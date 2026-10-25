@@ -48,6 +48,9 @@ window.__ModuleLoader__.load({
 [data-fq-btn][data-primary]{background:#3b82f6;border-color:#3b82f6;color:#fff;}
 [data-fq-ok]{font-size:11px;color:#22c55e;}
 [data-fq-err]{font-size:11px;color:#ef4444;}
+[data-fq-bar]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:10px 0;background:var(--dsw-alias-bg-layer-1,#17181c);border-bottom:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));}
+[data-fq-dirty]{font-size:11px;color:#f59e0b;}
 [data-fq-kv]{display:grid;grid-template-columns:110px 1fr;gap:4px 10px;font-size:11px;
   color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 `;
@@ -75,12 +78,14 @@ window.__ModuleLoader__.load({
       const [form, setForm] = React.useState({});
       const [msg, setMsg] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
+      const [dirty, setDirty] = React.useState(false);
 
       const load = React.useCallback(async () => {
         try {
           const r = await jget('/status');
           setSt(r);
           setForm((prev) => ({ ...r.config, autoSpeakKeywords: (r.config.autoSpeakKeywords || []).join('、'), ...prev }));
+          setDirty(false);
         } catch (e) {
           setMsg({ kind: 'err', text: '读取失败：' + String(e.message || e) });
         }
@@ -90,8 +95,8 @@ window.__ModuleLoader__.load({
         load();
       }, [load]);
 
-      const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-      const setRaw = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+      const set = (k) => (e) => { setDirty(true); setForm((f) => ({ ...f, [k]: e.target.value })); };
+      const setRaw = (k, v) => { setDirty(true); setForm((f) => ({ ...f, [k]: v })); };
 
       const save = async () => {
         setBusy(true);
@@ -110,6 +115,7 @@ window.__ModuleLoader__.load({
           payload.personaFiles = payload.personaFiles.map((x) => String(x || '').trim()).filter(Boolean);
           const r = await jpost('/config', payload);
           setSt(r);
+          setDirty(false);
           setMsg({ kind: 'ok', text: '已保存到 <stateDir>/config.json' });
         } catch (e) {
           setMsg({ kind: 'err', text: '保存失败：' + String(e.message || e) });
@@ -127,6 +133,13 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { 'data-fq': '' },
+
+        h('div', { 'data-fq-bar': '' },
+          h('button', { 'data-fq-btn': '', 'data-primary': '', disabled: busy, onClick: save }, busy ? '保存中…' : '保存'),
+          h('button', { 'data-fq-btn': '', onClick: load }, '重新读取'),
+          dirty ? h('span', { 'data-fq-dirty': '' }, '● 有未保存改动') : null,
+          msg ? h('span', { [msg.kind === 'ok' ? 'data-fq-ok' : 'data-fq-err']: '' }, msg.text) : null,
+        ),
 
         checks.length > 0
           ? h('div', { 'data-fq-sec': '' },
@@ -250,8 +263,9 @@ window.__ModuleLoader__.load({
         ),
 
         h('div', { 'data-fq-row': '' },
+          h('button', { 'data-fq-btn': '', 'data-primary': '', disabled: busy, onClick: save }, busy ? '保存中…' : '保存'),
           h('button', { 'data-fq-btn': '', onClick: load }, '重新读取'),
-          msg ? h('span', { [msg.kind === 'ok' ? 'data-fq-ok' : 'data-fq-err']: '' }, msg.text) : null,
+          dirty ? h('span', { 'data-fq-dirty': '' }, '● 有未保存改动') : null,
         ),
 
         h('div', { 'data-fq-kv': '' },

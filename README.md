@@ -229,6 +229,36 @@ if (verdict?.speak) { /* 放行这条消息 */ }
 
 ---
 
+## 架构：两个半边端，各管一段
+
+DSH 插件是「一个 npm 包，两半代码」，`package.json` 的 `dsh.client` 字段把两半分别指向不同进程：
+
+| 文件 | 跑在哪 | 干什么 | 依赖什么 |
+|---|---|---|---|
+| `index.js` | DSH 主进程（Node） | 读人设/群友档案/表情包目录，注册 6 个工具、注入 system prompt、挂 `/api/dfy-qq/*` 路由，并把服务对象挂到 `ctx.dfyqq` | 只依赖 DSH 运行时给的 `ctx`（`ctx.tools` / `ctx.systemPrompt` / `ctx.webServer` / `ctx.provide`）；`@deepseek-ai/dsh-tools` 和 `schemastery` 是可选 peer，装不上就退化成普通对象，不会崩 |
+| `client.js` | 浏览器（DSH Web GUI 里） | 往「设置」左侧导航塞一个「肥鱼·QQ」面板：表单、开关、配置体检、保存按钮 | 只用宿主注入的 `React` 和无构建 JSX 替身 `h()`，不 import 任何包、不需要打包器 |
+
+两半之间不共享内存，只通过 HTTP 讲话：`client.js` 调 `index.js` 挂的 `/api/dfy-qq/status`、`/api/dfy-qq/config`、`/api/dfy-qq/emoji/rebuild`、`/api/dfy-qq/reset-pity`。所以**改完两半都要重启 DSH**，前端那半刷新页面也行。
+
+保存按钮在设置页顶部（白底按钮，滚动时吸顶），改完表单会显示「● 有未保存改动」，点「保存」才落盘到 `<stateDir>/config.json`。底部还复制了一份，省得滚到底再爬回去。
+
+### 它需不需要别的插件？
+
+不需要。六个工具、设置页、表情包索引、配置体检全部独立可用——装上就能用，没人调用也不报错。
+
+唯一需要外部的是「真的去 QQ 群里说话」这一步：本插件是**行为层**，不连 QQ 协议。它把判定函数挂在 `ctx.dfyqq` 上，谁有通道谁调：
+
+```js
+const dfy = ctx.dfyqq;                       // 或 ctx.get('dfyqq')
+const { speak, reason } = dfy.shouldSpeak({ text, groupId, userId, nickname, mentioned });
+if (speak) {
+  await sendToQQ(reply);                     // 你自己通道层的事
+  const img = dfy.drawEmoji({ context: text });  // 有图就发
+}
+```
+
+没有通道层插件时，你依然可以：在设置页配人设、用 `dfy_persona_list`/`dfy_people_upsert`/`dfy_emoji_status` 这些工具、手动调 `dfy_emoji_draw` 抽图。所以别人 clone 下来是可以单独跑起来看的，只是不会自己去群里讲话。
+
 ## 目录结构
 
 ```
