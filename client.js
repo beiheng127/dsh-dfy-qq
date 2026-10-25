@@ -235,6 +235,98 @@ window.__ModuleLoader__.load({
         ),
 
         h('div', { 'data-fq-sec': '' },
+          h('div', { 'data-fq-h': '' }, 'QQ 通道（内置 OneBot 11）'),
+          h('div', { 'data-fq-row': '' },
+            h(Switch, {
+              on: !!(st.channel && st.channel.running),
+              disabled: busy,
+              onChange: async (v) => {
+                setBusy(true);
+                setMsg(null);
+                try {
+                  const r = await jpost(v ? '/channel/start' : '/channel/stop', { qqWsPort: Number(form.qqWsPort) || 6700 });
+                  setSt(r);
+                  setMsg(v
+                    ? (r.ok === false ? { kind: 'err', text: '启动失败：' + (r.error || '未知') } : { kind: 'ok', text: '通道已启动' })
+                    : { kind: 'ok', text: '通道已停止' });
+                } catch (e) {
+                  setMsg({ kind: 'err', text: '操作失败：' + String(e.message || e) });
+                } finally {
+                  setBusy(false);
+                }
+              },
+            }),
+            h('span', { 'data-fq-label': '' }, st.channel && st.channel.running ? '监听中' : '已停止'),
+            h('div', { 'data-fq-grow': '' }),
+            h('span', { 'data-fq-note': '' },
+              st.channel
+                ? `已连 ${st.channel.connected} 个 · 收 ${st.channel.inboundCount} / 发 ${st.channel.outboundCount} · 会话 ${(st.channel.chats || []).length}`
+                : ''),
+          ),
+          st.channel
+            ? h('div', { 'data-fq-note': '' },
+                `WS 地址：ws://${st.channel.host}:${st.channel.port}${st.channel.path}` +
+                  (st.channel.tokenRequired ? '（要 access_token）' : '（不校验 token）') +
+                  (st.channel.lastEventSummary ? ` · 最近事件：${st.channel.lastEventSummary}` : '') +
+                  (st.channel.lastError ? ` · 错误：${st.channel.lastError}` : ''))
+            : null,
+          h('div', { 'data-fq-row': '' },
+            h(Field, { label: '监听端口' },
+              h('input', { 'data-fq-input': '', type: 'number', min: 1, value: form.qqWsPort, onChange: set('qqWsPort') })),
+            h(Field, { label: '监听地址' },
+              h('input', { 'data-fq-input': '', value: form.qqHost || '', onChange: set('qqHost'), placeholder: '127.0.0.1' })),
+          ),
+          h(Field, { label: 'access_token（留空 = 不校验）' },
+            h('input', { 'data-fq-input': '', value: form.qqAccessToken || '', onChange: set('qqAccessToken') })),
+          h(Field, { label: '群白名单（逗号分隔，空 = 所有群）' },
+            h('input', {
+              'data-fq-input': '',
+              value: Array.isArray(form.qqGroups) ? form.qqGroups.join(',') : String(form.qqGroups || ''),
+              onChange: (e) => setRaw('qqGroups', e.target.value.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean)),
+              placeholder: '123456,789012',
+            })),
+          h(Field, { label: 'bot 自己的 QQ（防空回复回环）' },
+            h('input', { 'data-fq-input': '', value: form.qqSelfQQ || '', onChange: set('qqSelfQQ'), placeholder: '1053187718' })),
+          h(Field, { label: 'QQ 会话工作目录（相对工作区，空 = 根）' },
+            h('input', { 'data-fq-input': '', value: form.qqCwd || '', onChange: set('qqCwd'), placeholder: '留空' })),
+          h('div', { 'data-fq-note': '' }, 'NapCat 里配「反向 WebSocket」：ws://127.0.0.1:6700/onebot/v11/ws，token 同上。改完点顶部保存，再开关一次通道。'),
+        ),
+
+        h('div', { 'data-fq-sec': '' },
+          h('div', { 'data-fq-h': '' }, '定时任务'),
+          h(Field, { label: '一行一条：HH:MM | 群号或 private-QQ | 主题', note: '# 开头的行忽略；同一分钟同目标一天只跑一次。' },
+            h('textarea', {
+              'data-fq-input': '',
+              rows: 4,
+              value: form.qqTasks || '',
+              onChange: set('qqTasks'),
+              placeholder: '09:00 | 123456789 | 早上问个好\n21:30 | private-934705339 | 提醒今天没写完的活',
+            })),
+          h('div', { 'data-fq-row': '' },
+            h('button', {
+              'data-fq-btn': '',
+              disabled: busy,
+              onClick: async () => {
+                setBusy(true);
+                try {
+                  const r = await jpost('/channel/tasks', { qqTasks: String(form.qqTasks || '') });
+                  setSt(r);
+                  setMsg({ kind: 'ok', text: `定时任务已存：${(r.channel && r.channel.tasks ? r.channel.tasks.length : 0)} 条` });
+                } catch (e) {
+                  setMsg({ kind: 'err', text: '保存失败：' + String(e.message || e) });
+                } finally {
+                  setBusy(false);
+                }
+              },
+            }, '单独保存定时任务'),
+            h('span', { 'data-fq-note': '' },
+              st.channel
+                ? `已排 ${(st.channel.tasks || []).length} 条 · 今天已跑 ${st.channel.taskRuns || 0} 次`
+                : ''),
+          ),
+        ),
+
+        h('div', { 'data-fq-sec': '' },
           h('div', { 'data-fq-h': '' }, '主动接话'),
           h('div', { 'data-fq-row': '' },
             h(Switch, { on: !!form.autoSpeakEnabled, onChange: (v) => setRaw('autoSpeakEnabled', v) }),
@@ -260,12 +352,6 @@ window.__ModuleLoader__.load({
           h(Field, { label: '最近多少张不重复发' },
             h('input', { 'data-fq-input': '', type: 'number', min: 0, value: form.emojiRecentSkip, onChange: set('emojiRecentSkip') })),
           h('div', { 'data-fq-note': '' }, `已记 ${rt.memoryChats || 0} 个会话 / ${rt.memoryRows || 0} 条 · 见过的号 ${rt.peopleSeen || 0} 个`),
-        ),
-
-        h('div', { 'data-fq-row': '' },
-          h('button', { 'data-fq-btn': '', 'data-primary': '', disabled: busy, onClick: save }, busy ? '保存中…' : '保存'),
-          h('button', { 'data-fq-btn': '', onClick: load }, '重新读取'),
-          dirty ? h('span', { 'data-fq-dirty': '' }, '● 有未保存改动') : null,
         ),
 
         h('div', { 'data-fq-kv': '' },

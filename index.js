@@ -9,6 +9,7 @@
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, appendFileSync } from 'node:fs';
 import { join, dirname, resolve, extname } from 'node:path';
+import { createChannel } from './channel.js';
 
 let defineTool = (options) => options;
 try {
@@ -67,6 +68,15 @@ const DEFAULTS = {
   memoryChats: 3,
   replyMaxChars: 220,
   emojiRecentSkip: 8,
+  // ---- 内置 OneBot 通道（NapCat / go-cqhttp 直连，不依赖别的插件）----
+  qqEnabled: false,
+  qqWsPort: 6700,
+  qqHost: '127.0.0.1',
+  qqAccessToken: '',
+  qqGroups: [],
+  qqSelfQQ: '',
+  qqCwd: '',
+  qqTasks: '',
 };
 
 export const name = 'dsh-dfy-qq';
@@ -95,6 +105,14 @@ export const Config = z
       memoryChats: z.natural().min(1).default(3).description('同时保留几个群/会话的记忆'),
       replyMaxChars: z.natural().default(220).description('单条回复字数上限，0 = 不限'),
       emojiRecentSkip: z.natural().default(8).description('最近发过的这么多张，下次尽量避开'),
+      qqEnabled: z.boolean().default(false).description('开启内置 OneBot 通道（NapCat 直连，不依赖别的插件）'),
+      qqWsPort: z.natural().default(6700).description('OneBot 反向 WS 监听端口'),
+      qqHost: z.string().default('127.0.0.1').description('监听地址，默认只本机'),
+      qqAccessToken: z.string().default('').description('OneBot access_token；空 = 不校验'),
+      qqGroups: z.array(z.string()).default([]).description('群白名单，空 = 全部群都接'),
+      qqSelfQQ: z.string().default('').description('bot 自己的 QQ，防止自问自答'),
+      qqCwd: z.string().default('').description('QQ 会话的工作目录（相对工作区），空 = 工作区根'),
+      qqTasks: z.string().default('').description('定时任务，一行一条：HH:MM | 群号或 private-QQ | 主题'),
     })
   : DEFAULTS;
 
@@ -739,6 +757,67 @@ export function apply(ctx, rawConfig = {}) {
   if (ctx.provide) ctx.provide('dfyqq', service);
   else if (ctx.set) ctx.set('dfyqq', service);
 
+  // ---- 内置 OneBot 通道（NapCat / go-cqhttp 直连；不装 dsh-onebot-qq 也能跑）----
+  // cfg 会在设置页保存时被整体替换，所以给通道一个 Proxy，永远读当前对象。
+  const liveCfg = new Proxy(
+    {},
+    {
+      get: (_t, k) => cfg[k],
+      set: (_t, k, v) => {
+        cfg[k] = v;
+        return true;
+      },
+      has: (_t, k) => k in cfg,
+      ownKeys: () => Reflect.ownKeys(cfg),
+      getOwnPropertyDescriptor: (_t, k) => ({ configurable: true, enumerable: true, value: cfg[k] }),
+    },
+  );
+  const channelLog = (level, msg) => {
+    try {
+      mkdirSync(stateDir, { recursive: true });
+      appendFileSync(join(stateDir, 'channel.log'), `${new Date().toISOString()} [${level}] ${msg}\n`, 'utf8');
+    } catch {
+      /* ignore */
+    }
+  };
+  const channel = createChannel({
+    ctx,
+    cfg: liveCfg,
+    stateDir,
+    workspace: ws,
+    log: channelLog,
+    rememberInbound,
+    drawEmoji: () => drawEmoji(),
+  });
+
+  const startChannel = async () => {
+    try {
+      const r = await channel.start();
+      return { ok: true, ...r };
+    } catch (e) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+  };
+
+  if (cfg.qqEnabled) {
+    void startChannel().then((r) => {
+      if (!r.ok) channelLog('error', '通道启动失败：' + r.error);
+    });
+  }
+
+  if (ctx.effect) {
+    try {
+      ctx.effect(
+        () => () => {
+          void channel.dispose();
+        },
+        'dfy-qq: 内置 OneBot 通道',
+      );
+    } catch {
+      /* ignore */
+    }
+  }
+
   // ---- 设置页 API ----
   const sendJson = (res, code, obj) => {
     res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
@@ -822,6 +901,7 @@ export function apply(ctx, rawConfig = {}) {
       memoryRows: Object.values(state.chatMemory || {}).reduce((n, a) => n + a.length, 0),
       peopleSeen: Object.keys(state.peopleSeen || {}).length,
     },
+    channel: channel.status(),
   });
 
   const handle = async (req, res, url) => {
@@ -853,6 +933,35 @@ export function apply(ctx, rawConfig = {}) {
       state.emojiMisses = 0;
       saveState();
       return sendJson(res, 200, { ok: true });
+    }
+    // ---- 内置 OneBot 通道 ----
+    if (req.method === 'POST' && path === '/api/dfy-qq/channel/start') {
+      const body = await readBody(req);
+      const patch = {};
+      for (const k of Object.keys(DEFAULTS)) if (k in body) patch[k] = body[k];
+      cfg = { ...cfg, ...patch, qqEnabled: true };
+      const onDisk = readJson(overridePath, {});
+      writeJson(overridePath, { ...onDisk, ...cfg });
+      const started = await startChannel();
+      refresh();
+      return sendJson(res, started.ok ? 200 : 500, { ...started, ...status() });
+    }
+    if (req.method === 'POST' && path === '/api/dfy-qq/channel/stop') {
+      cfg = { ...cfg, qqEnabled: false };
+      const onDisk = readJson(overridePath, {});
+      writeJson(overridePath, { ...onDisk, ...cfg });
+      const stopped = await channel.stop();
+      return sendJson(res, 200, { ok: true, stopped, ...status() });
+    }
+    if (req.method === 'POST' && path === '/api/dfy-qq/channel/tasks') {
+      const body = await readBody(req);
+      const text = typeof body.qqTasks === 'string' ? body.qqTasks : typeof body.text === 'string' ? body.text : null;
+      if (text === null) return sendJson(res, 400, { ok: false, error: '需要 qqTasks 字段（一行一条：HH:MM | 群号 | 主题）' });
+      cfg = { ...cfg, qqTasks: text };
+      const onDisk = readJson(overridePath, {});
+      writeJson(overridePath, { ...onDisk, ...cfg });
+      refresh();
+      return sendJson(res, 200, { ok: true, ...status() });
     }
     return sendJson(res, 404, { ok: false, error: 'not found' });
   };

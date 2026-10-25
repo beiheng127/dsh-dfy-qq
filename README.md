@@ -152,20 +152,60 @@ AGENTS.md
 
 ## 接入聊天通道
 
-插件本身不连 QQ，它只提供 `dfyqq` 服务和几个工具，由通道层调用。
+**现在自带通道了**：插件里跑一个 OneBot 11 反向 WebSocket 服务（`channel.js`），NapCat / LLOneBot / go-cqhttp 连上来就能用，不需要再装 `dsh-onebot-qq`。
 
-### 主动接话
+### 1. 开通道
 
-通道层的入站消息（群消息、未 @）在决定"要不要交给模型"时调用：
+设置页 →「肥鱼·QQ」→「QQ 通道（内置 OneBot 11）」→ 打开开关。默认：
 
-```js
-const verdict = ctx.get('dfyqq')?.shouldSpeak(payload);
-if (verdict?.speak) { /* 放行这条消息 */ }
+```text
+ws://127.0.0.1:6700/onebot/v11/ws
 ```
 
-`payload` 里能带 `text`、`mentioned`、`groupId`、`userId`、`nickname` —— 带得越全，短期记忆和认人越准。
+要 token 就填 `access_token`，NapCat 那边填同一个。
 
-内置的 `dsh-onebot-qq` 通道需要打一个两行的补丁（在 `lib/bridge.js` 里把 `shouldSpeak` 接出来，在 `lib/inbound.js` 里让未 @ 的消息按 verdict 放行）。打补丁要重启 DSH。
+### 2. NapCat 配反向 WS
+
+NapCat 的 `onebot11_<QQ号>.json`（或者 WebUI 里）加一条：
+
+```json
+{
+  "network": {
+    "websocketClients": [
+      { "name": "dsh-dfy-qq", "url": "ws://127.0.0.1:6700/onebot/v11/ws", "token": "", "enable": true }
+    ]
+  }
+}
+```
+
+连上后设置页会显示「已连 1 个」，`<工作区>/.dfyqq/channel.log` 里也有 `OneBot 已连接`。
+
+### 3. 消息怎么走
+
+- 群里被 @、或者命中关键词 / 概率接话 → 建一个 DSH 会话（`sessionId = dfyqq-group-<群号>`），把这条消息 `followup` 进去。
+- 模型吐出来的文本按 `replyMaxChars` 拆段，逐段 `send_msg` 发回去。
+- 想发图：模型调 `dfy_emoji_draw` 拿到路径，通道读到路径就 `send_group_msg`（`image` 段）发出去。
+- 同一个群共用一个会话，上下文连续；`.dfyqq/qq-channel.json` 记住会话 id，重启后接得上。
+
+### 4. 定时任务
+
+设置页「定时任务」区块，一行一条：
+
+```text
+09:00 | 123456789 | 早上问个好
+21:30 | private-934705339 | 提醒今天没写完的活
+```
+
+`HH:MM | 群号或 private-QQ | 主题`；`#` 开头忽略。到点由插件自己建/复用会话，让模型按主题主动开一句再发出去。同一分钟同目标一天只跑一次（记在 `qq-channel.json`）。
+
+> 不想要自带通道也还能接别的：插件对外提供 `dfyqq` 服务和 `shouldSpeak()`，任何通道层都能调。
+>
+> ```js
+> const verdict = ctx.get('dfyqq')?.shouldSpeak(payload);
+> if (verdict?.speak) { /* 放行这条消息 */ }
+> ```
+>
+> `payload` 里带 `text`、`mentioned`、`groupId`、`userId`、`nickname` —— 带得越全，短期记忆和认人越准。
 
 > 官方 QQ 机器人通道只推送 `@` 过的群消息，插件侧算得再准也接不到——想接话必须走 OneBot（NapCat / LLOneBot 之类）。
 
@@ -201,6 +241,14 @@ if (verdict?.speak) { /* 放行这条消息 */ }
 | `memoryRounds` | `20` | 每个会话保留最近多少条 |
 | `memoryChats` | `3` | 同时保留几个会话 |
 | `replyMaxChars` | `220` | 单条回复字数上限，0 = 不限 |
+| `qqEnabled` | `false` | 开关内置 OneBot 通道 |
+| `qqWsPort` | `6700` | 反向 WS 监听端口 |
+| `qqHost` | `127.0.0.1` | 监听地址 |
+| `qqAccessToken` | `''` | OneBot token，空 = 不校验 |
+| `qqGroups` | `[]` | 群白名单，空 = 全部群 |
+| `qqSelfQQ` | `''` | bot 自己的 QQ，防空回复回环 |
+| `qqCwd` | `''` | QQ 会话工作目录（相对工作区） |
+| `qqTasks` | `''` | 定时任务，一行一条 `HH:MM \| 目标 \| 主题` |
 | `stateDir` | `<工作区>/.dfyqq` | 状态目录 |
 
 ---
