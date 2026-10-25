@@ -221,7 +221,8 @@ export function createChannel(opts) {
   let running = false;
   let lastError = '';
   const sockets = new Set();
-  const chats = new Map(); // chatId -> runtime record
+  const chats = new Map();
+  const eventSeen = Object.create(null); // chatId -> runtime record
   const pendingActions = new Map();
   let seq = 0;
   let lastEventAt = 0;
@@ -321,6 +322,7 @@ export function createChannel(opts) {
     try {
       if (!event) return;
       const type = event.type;
+      if (type) eventSeen[type] = (eventSeen[type] || 0) + 1;
       if (type !== 'assistant/message') return;
       const msg = event.data?.message;
       if (!msg) return;
@@ -346,7 +348,15 @@ export function createChannel(opts) {
         /* 退回最小结构 */
       }
     }
-    return { content: [{ type: 'text', text }], source: { kind: 'plugin:dsh-dfy-qq' } };
+    // 宿主包里拿不到 @deepseek-ai/dsh-llm（插件目录不解析宿主的 node_modules），
+    // 这里按 llm message 的形状自己造：必须有 role 和 id，缺了 followup 会被静默丢掉。
+    const id = globalThis.crypto?.randomUUID?.() || ('fq-' + Date.now().toString(36) + '-' + Math.random().toString(16).slice(2));
+    return Object.freeze({
+      id,
+      role: 'user',
+      content: Object.freeze([Object.freeze({ type: 'text', text })]),
+      source: Object.freeze({ kind: 'plugin:dsh-dfy-qq' }),
+    });
   }
 
   async function sendSegments(chatId, segments) {
@@ -721,6 +731,7 @@ export function createChannel(opts) {
       })),
       inboundCount,
       outboundCount,
+      eventSeen: Object.assign({}, eventSeen),
       lastEventAt,
       lastEventSummary,
       lastError,
