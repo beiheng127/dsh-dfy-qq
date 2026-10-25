@@ -51,6 +51,12 @@ window.__ModuleLoader__.load({
 [data-fq-bar]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
   padding:10px 0;background:var(--dsw-alias-bg-layer-1,#17181c);border-bottom:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));}
 [data-fq-dirty]{font-size:11px;color:#f59e0b;}
+[data-fq-tabs]{display:flex;gap:6px;padding:6px;border-radius:10px;background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.04));}
+[data-fq-tab]{flex:1;padding:8px 10px;border:0;border-radius:8px;background:transparent;color:inherit;font-size:12px;cursor:pointer;}
+[data-fq-tab][data-on]{background:var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));font-weight:600;}
+[data-fq][data-active-tab="basic"] [data-tab]:not([data-tab="basic"]),
+[data-fq][data-active-tab="interact"] [data-tab]:not([data-tab="interact"]),
+[data-fq][data-active-tab="onebot"] [data-tab]:not([data-tab="onebot"]){display:none;}
 [data-fq-kv]{display:grid;grid-template-columns:110px 1fr;gap:4px 10px;font-size:11px;
   color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 `;
@@ -79,6 +85,7 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
       const [dirty, setDirty] = React.useState(false);
+      const [tab, setTab] = React.useState('basic');
 
       const load = React.useCallback(async () => {
         try {
@@ -132,13 +139,23 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { 'data-fq': '' },
+        { 'data-fq': '', 'data-active-tab': tab },
 
         h('div', { 'data-fq-bar': '' },
           h('button', { 'data-fq-btn': '', 'data-primary': '', disabled: busy, onClick: save }, busy ? '保存中…' : '保存'),
           h('button', { 'data-fq-btn': '', onClick: load }, '重新读取'),
           dirty ? h('span', { 'data-fq-dirty': '' }, '● 有未保存改动') : null,
           msg ? h('span', { [msg.kind === 'ok' ? 'data-fq-ok' : 'data-fq-err']: '' }, msg.text) : null,
+        ),
+
+        h('div', { 'data-fq-tabs': '' },
+          ...[['basic', '基础'], ['interact', '互动'], ['onebot', 'OneBot']].map(([id, label]) =>
+            h('button', {
+              'data-fq-tab': '',
+              'data-on': tab === id ? '' : undefined,
+              onClick: () => setTab(id),
+            }, label),
+          ),
         ),
 
         checks.length > 0
@@ -150,7 +167,7 @@ window.__ModuleLoader__.load({
             )
           : null,
 
-        h('div', { 'data-fq-sec': '' },
+        h('div', { 'data-fq-sec': '', 'data-tab': 'basic' },
           h('div', { 'data-fq-h': '' }, '工作区'),
           h(Field, { label: '工作区根目录', note: '下面所有相对路径都按它解析。改了要保存，然后重启 DSH。' },
             h('input', {
@@ -162,7 +179,7 @@ window.__ModuleLoader__.load({
           h('div', { 'data-fq-note': '' }, `当前：${rt.workspace || '（未设置，用进程目录）'}`),
         ),
 
-        h('div', { 'data-fq-sec': '' },
+        h('div', { 'data-fq-sec': '', 'data-tab': 'basic' },
           h('div', { 'data-fq-h': '' }, '人设'),
           h(Field, { label: '人设文件（相对工作区，一行一个，按顺序拼接）', note: '例：kb/人设-蓝色大肥鱼/….txt 换行 AGENTS.md。改了要保存后重新加载。' },
             h('textarea', {
@@ -177,7 +194,7 @@ window.__ModuleLoader__.load({
           h('div', { 'data-fq-note': '' }, `当前来源：${rt.personaSource} · ${rt.personaChars} 字符`),
         ),
 
-        h('div', { 'data-fq-sec': '' },
+        h('div', { 'data-fq-sec': '', 'data-tab': 'basic' },
           h('div', { 'data-fq-h': '' }, '子人格'),
           h(Field, { label: '人格目录（相对工作区）', note: '一个 .md 一份人格；第一行 # 标题，> 简介：一句话。' },
             h('input', { 'data-fq-input': '', value: form.personasDir || '', onChange: set('personasDir'), placeholder: 'personas' })),
@@ -209,14 +226,14 @@ window.__ModuleLoader__.load({
           }),
         ),
 
-        h('div', { 'data-fq-sec': '' },
+        h('div', { 'data-fq-sec': '', 'data-tab': 'basic' },
           h('div', { 'data-fq-h': '' }, '认人'),
           h(Field, { label: '群友档案路径' },
             h('input', { 'data-fq-input': '', value: form.peopleFile || '', onChange: set('peopleFile') })),
           h('div', { 'data-fq-note': '' }, `实际：${rt.peopleFile}`),
         ),
 
-        h('div', { 'data-fq-sec': '' },
+        h('div', { 'data-fq-sec': '', 'data-tab': 'interact' },
           h('div', { 'data-fq-h': '' }, '表情包'),
           h(Field, { label: '表情包文件夹' },
             h('input', { 'data-fq-input': '', value: form.emojiDir || '', onChange: set('emojiDir'), placeholder: '留空 = <工作区>/emoji；相对路径按工作区解析' })),
@@ -234,7 +251,7 @@ window.__ModuleLoader__.load({
           ),
         ),
 
-        h('div', { 'data-fq-sec': '' },
+        h('div', { 'data-fq-sec': '', 'data-tab': 'onebot' },
           h('div', { 'data-fq-h': '' }, 'QQ 通道（内置 OneBot 11）'),
           h('div', { 'data-fq-row': '' },
             h(Switch, {
@@ -292,7 +309,7 @@ window.__ModuleLoader__.load({
           h('div', { 'data-fq-note': '' }, 'NapCat 里配「反向 WebSocket」：ws://127.0.0.1:6700/onebot/v11/ws，token 同上。改完点顶部保存，再开关一次通道。'),
         ),
 
-        h('div', { 'data-fq-sec': '' },
+        h('div', { 'data-fq-sec': '', 'data-tab': 'onebot' },
           h('div', { 'data-fq-h': '' }, '定时任务'),
           h(Field, { label: '一行一条：HH:MM | 群号或 private-QQ | 主题', note: '# 开头的行忽略；同一分钟同目标一天只跑一次。' },
             h('textarea', {
@@ -308,7 +325,7 @@ window.__ModuleLoader__.load({
               : '改完点顶部保存即生效'),
         ),
 
-        h('div', { 'data-fq-sec': '' },
+        h('div', { 'data-fq-sec': '', 'data-tab': 'interact' },
           h('div', { 'data-fq-h': '' }, '主动接话'),
           h('div', { 'data-fq-row': '' },
             h(Switch, { on: !!form.autoSpeakEnabled, onChange: (v) => setRaw('autoSpeakEnabled', v) }),
@@ -323,7 +340,7 @@ window.__ModuleLoader__.load({
             h('input', { 'data-fq-input': '', value: form.autoSpeakKeywords || '', onChange: set('autoSpeakKeywords') })),
         ),
 
-        h('div', { 'data-fq-sec': '' },
+        h('div', { 'data-fq-sec': '', 'data-tab': 'interact' },
           h('div', { 'data-fq-h': '' }, '记忆与回复'),
           h(Field, { label: '每个会话记最近 N 条', note: '超出的自然滚掉；同时保留的会话数也有限制。' },
             h('input', { 'data-fq-input': '', type: 'number', min: 4, value: form.memoryRounds, onChange: set('memoryRounds') })),
