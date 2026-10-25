@@ -77,6 +77,9 @@ const DEFAULTS = {
   qqSelfQQ: '',
   qqCwd: '',
   qqSessionPrefix: 'onebot-',
+  qqChannelAutoLaunch: false,
+  qqNapcatBat: '',
+  qqNapcatUin: '',
   qqTasks: '',
 };
 
@@ -113,6 +116,9 @@ export const Config = z
       qqGroups: z.array(z.string()).default([]).description('群白名单，空 = 全部群都接'),
       qqSelfQQ: z.string().default('').description('bot 自己的 QQ，防止自问自答'),
       qqCwd: z.string().default('').description('QQ 会话的工作目录（相对工作区），空 = 工作区根'),
+      qqChannelAutoLaunch: z.boolean().default(false).description('OneBot 断线时自动拉起 NapCat（持久在线）'),
+      qqNapcatBat: z.string().default('').description('NapCat 启动脚本全路径，例如 C:\...\napcat.bat'),
+      qqNapcatUin: z.string().default('').description('快速登录用的小号 QQ，留空 = 用 bot 自己的 QQ'),
       qqSessionPrefix: z.string().default('onebot-').description('QQ 会话 id 前缀；默认 onebot- ，直接接上旧 dsh-onebot-qq 的老会话（历史聊天都在）'),
       qqTasks: z.string().default('').description('定时任务，一行一条：HH:MM | 群号或 private-QQ | 主题'),
     })
@@ -947,6 +953,10 @@ export function apply(ctx, rawConfig = {}) {
       const started = await startChannel();
       refresh();
       return sendJson(res, started.ok ? 200 : 500, { ...started, ...status() });
+    }
+    if (req.method === 'POST' && path === '/api/dfy-qq/channel/launch') {
+      const r = channel.launch();
+      return sendJson(res, r.ok ? 200 : 400, { ...r, ...status() });
     }
     if (req.method === 'POST' && path === '/api/dfy-qq/channel/stop') {
       cfg = { ...cfg, qqEnabled: false };

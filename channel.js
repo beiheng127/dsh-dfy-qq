@@ -15,8 +15,9 @@
  */
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { spawn } from 'node:child_process';
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_FRAME = 4 * 1024 * 1024;
@@ -239,6 +240,72 @@ export function createChannel(opts) {
     return raw.map((s) => String(s).trim()).filter(Boolean);
   };
   const accessToken = () => String(cfg.qqAccessToken || '').trim();
+
+  // ---- NapCat 守护：断线自动拉起 + 登录态探测 ----
+  let monitorTimer = null;
+  let noSocketSince = Date.now();
+  let loginInfo = { ok: false, at: 0, uin: '', nickname: '' };
+  const launcher = { spawned: 0, lastSpawnAt: 0, lastError: '' };
+
+  const napcatBat = () => String(cfg.qqNapcatBat || '').trim();
+  const napcatUin = () => String(cfg.qqNapcatUin || cfg.qqSelfQQ || '').trim();
+
+  function launchNapcat() {
+    const bat = napcatBat();
+    if (!bat) return { ok: false, error: '还没填 NapCat 启动脚本路径' };
+    if (!existsSync(bat)) return { ok: false, error: '找不到：' + bat };
+    const now = Date.now();
+    if (now - launcher.lastSpawnAt < 30000) return { ok: false, error: '刚拉起过，再等一会儿' };
+    launcher.lastSpawnAt = now;
+    launcher.spawned += 1;
+    try {
+      const uin = napcatUin();
+      const child = spawn(bat, uin ? ['-q', uin] : [], {
+        cwd: dirname(bat),
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        shell: process.platform === 'win32',
+      });
+      child.on('error', (e) => {
+        launcher.lastError = String(e?.message ?? e);
+      });
+      child.unref();
+      log('info', '已拉起 NapCat：' + bat + (uin ? ' -q ' + uin : ''));
+      return { ok: true };
+    } catch (e) {
+      launcher.lastError = String(e?.message ?? e);
+      return { ok: false, error: launcher.lastError };
+    }
+  }
+
+  async function probeLogin() {
+    if (sockets.size === 0) return;
+    try {
+      const info = await callAction('get_login_info', {}, 8000);
+      const d = info?.data || info || {};
+      loginInfo = {
+        ok: true,
+        at: Date.now(),
+        uin: String(d.user_id || d.userId || ''),
+        nickname: String(d.nickname || ''),
+      };
+    } catch {
+      loginInfo = { ...loginInfo, ok: false, at: Date.now() };
+    }
+  }
+
+  function watchNapcat() {
+    if (sockets.size > 0) {
+      noSocketSince = 0;
+      return;
+    }
+    if (!noSocketSince) noSocketSince = Date.now();
+    if (!cfg.qqChannelAutoLaunch) return;
+    if (Date.now() - noSocketSince < 45000) return;
+    launchNapcat();
+    noSocketSince = Date.now();
+  }
 
   function broadcast(obj) {
     const frame = encodeFrame(0x1, Buffer.from(JSON.stringify(obj), 'utf8'));
@@ -670,6 +737,13 @@ export function createChannel(opts) {
         lastError = '';
         log('info', 'OneBot 反向 WS 已监听 ws://' + host + ':' + port + '/onebot/v11/ws');
         if (!taskTimer) taskTimer = setInterval(tickTasks, 20000);
+        if (!monitorTimer) {
+          monitorTimer = setInterval(() => {
+            watchNapcat();
+            void probeLogin();
+          }, 20000);
+        }
+        void probeLogin();
         tickTasks();
         res({ ok: true, port, host });
       });
@@ -681,6 +755,10 @@ export function createChannel(opts) {
     if (taskTimer) {
       clearInterval(taskTimer);
       taskTimer = null;
+    }
+    if (monitorTimer) {
+      clearInterval(monitorTimer);
+      monitorTimer = null;
     }
     for (const p of pendingActions.values()) {
       clearTimeout(p.timer);
@@ -741,6 +819,9 @@ export function createChannel(opts) {
       lastEventAt,
       lastEventSummary,
       lastError,
+      login: loginInfo,
+      launcher: { ...launcher, bat: napcatBat(), uin: napcatUin() },
+      autoLaunch: Boolean(cfg.qqChannelAutoLaunch),
       tasks: parseTasks(),
       lastTaskAt,
       taskRuns: Object.keys(state.tasks || {}).length,
@@ -754,6 +835,7 @@ export function createChannel(opts) {
   return {
     start,
     stop,
+    launch: launchNapcat,
     status,
     handleEvent,
     splitText,

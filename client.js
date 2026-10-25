@@ -249,6 +249,8 @@ window.__ModuleLoader__.load({
             h('button', { 'data-fq-btn': '', onClick: async () => { const r = await jpost('/emoji/rebuild'); setMsg({ kind: r.ok ? 'ok' : 'err', text: r.ok ? `索引已重建：${r.count} 张` : '重建失败' }); } }, '重建索引'),
             h('button', { 'data-fq-btn': '', onClick: async () => { await jpost('/reset-pity'); await load(); } }, '清零保底'),
           ),
+          h(Field, { label: '最近多少张不重复发' },
+            h('input', { 'data-fq-input': '', type: 'number', min: 0, value: form.emojiRecentSkip, onChange: set('emojiRecentSkip') })),
         ),
 
         h('div', { 'data-fq-sec': '', 'data-tab': 'onebot' },
@@ -310,6 +312,44 @@ window.__ModuleLoader__.load({
         ),
 
         h('div', { 'data-fq-sec': '', 'data-tab': 'onebot' },
+          h('div', { 'data-fq-h': '' }, '持久登录（NapCat 守护）'),
+          h('div', { 'data-fq-row': '' },
+            h(Switch, { on: !!form.qqChannelAutoLaunch, onChange: (v) => setRaw('qqChannelAutoLaunch', v) }),
+            h('span', { 'data-fq-label': '' }, '掉线时自动把 NapCat 拉起来'),
+          ),
+          h('div', { 'data-fq-note': '' }, 'NapCat 会自己记住 QQ 登录（快速登录），这里管的是「它退了 / 崩了能自己回来」。开关要保存后重启 DSH 才生效。'),
+          h(Field, { label: 'NapCat 启动脚本（napcat.bat 全路径）', note: '用的是带 `-q 小号` 那种快速登录启动方式。' },
+            h('input', { 'data-fq-input': '', value: form.qqNapcatBat || '', onChange: set('qqNapcatBat'), placeholder: 'C:\...\napcat.bat' })),
+          h(Field, { label: '小号 QQ（快速登录）' },
+            h('input', { 'data-fq-input': '', value: form.qqNapcatUin || '', onChange: set('qqNapcatUin'), placeholder: '1053187718' })),
+          h('div', { 'data-fq-row': '' },
+            h('button', {
+              'data-fq-btn': '',
+              onClick: async () => {
+                setMsg(null);
+                try {
+                  const r = await jpost('/channel/launch', {});
+                  setSt(r);
+                  setMsg({ kind: 'ok', text: '已拉起 NapCat，等它连上来' });
+                } catch (e) {
+                  setMsg({ kind: 'err', text: '拉起失败：' + String(e.message || e) });
+                }
+              },
+            }, '立即拉起 NapCat'),
+            h('div', { 'data-fq-grow': '' }),
+            h('span', { 'data-fq-note': '' },
+              st.channel && st.channel.login && st.channel.login.ok
+                ? `已登录：${st.channel.login.nickname || '?'}（${st.channel.login.uin || '?'}）`
+                : '登录态：未探测到'),
+          ),
+          st.channel && st.channel.launcher
+            ? h('div', { 'data-fq-note': '' },
+                `已自动拉起 ${st.channel.launcher.spawned || 0} 次 · 守护 ${st.channel.autoLaunch ? '开' : '关'}` +
+                  (st.channel.launcher.lastError ? ` · 上次错误：${st.channel.launcher.lastError}` : ''))
+            : null,
+        ),
+
+        h('div', { 'data-fq-sec': '', 'data-tab': 'onebot' },
           h('div', { 'data-fq-h': '' }, '定时任务'),
           h(Field, { label: '一行一条：HH:MM | 群号或 private-QQ | 主题', note: '# 开头的行忽略；同一分钟同目标一天只跑一次。' },
             h('textarea', {
@@ -348,8 +388,6 @@ window.__ModuleLoader__.load({
             h('input', { 'data-fq-input': '', type: 'number', min: 1, value: form.memoryChats, onChange: set('memoryChats') })),
           h(Field, { label: '单条回复字数上限（0 = 不限）', note: '超了就拆成 2~3 段发。' },
             h('input', { 'data-fq-input': '', type: 'number', min: 0, value: form.replyMaxChars, onChange: set('replyMaxChars') })),
-          h(Field, { label: '最近多少张不重复发' },
-            h('input', { 'data-fq-input': '', type: 'number', min: 0, value: form.emojiRecentSkip, onChange: set('emojiRecentSkip') })),
           h('div', { 'data-fq-note': '' }, `已记 ${rt.memoryChats || 0} 个会话 / ${rt.memoryRows || 0} 条 · 见过的号 ${rt.peopleSeen || 0} 个`),
         ),
 
