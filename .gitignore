@@ -1,0 +1,4 @@
+node_modules/
+*.bak-*
+kb/
+.DS_Store
