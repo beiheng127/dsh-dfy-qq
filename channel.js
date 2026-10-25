@@ -17,7 +17,7 @@ import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_FRAME = 4 * 1024 * 1024;
@@ -183,6 +183,70 @@ export function splitText(text, limit) {
   return out.filter(Boolean);
 }
 
+
+function toFileUri(p) {
+  return 'file:///' + String(p).replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+function stripFileUri(p) {
+  const low = p.toLowerCase();
+  if (low.startsWith('file:///')) p = p.slice(8);
+  else if (low.startsWith('file://')) p = p.slice(7);
+  try {
+    return decodeURIComponent(p);
+  } catch {
+    return p;
+  }
+}
+
+function normalizeImagePath(raw) {
+  let p = String(raw || '').trim().replace(/^["'<]+/, '').replace(/["'>]+$/, '');
+  p = stripFileUri(p);
+  p = p.replace(/^\/([A-Za-z]:[\\/])/, '$1');
+  if (!/\.(gif|png|jpe?g)$/i.test(p)) return '';
+  try {
+    if (!existsSync(p)) return '';
+  } catch {
+    return '';
+  }
+  return p;
+}
+
+/**
+ * splitRichText: ordered [{kind:'text',text} | {kind:'image',file}].
+ * Understands ![alt](path), file:///path and bare absolute image paths.
+ */
+export function splitRichText(text, limit) {
+  const src = String(text || '').trim();
+  if (!src) return [];
+  // CQ 码整段优先吃掉；markdown / file:// / 裸路径按图片扩展名收尾，
+  // 这样路径里带括号和空格（表情包名常见 “达妮娅_加载(睡觉)”）也能认出来。
+  const RE = /\[CQ:image,[^\]]*?file=([^,\]]+)[^\]]*\]|!\[[^\]]*\]\(([^\n]+?\.(?:gif|png|jpe?g))\)|(file:\/\/\/?[^\n"']*?\.(?:gif|png|jpe?g))|([A-Za-z]:[\\/][^\n"']*?\.(?:gif|png|jpe?g))/gi;
+  const out = [];
+  let last = 0;
+  let m;
+  const pushText = (t) => {
+    for (const piece of splitText(t, limit)) out.push({ kind: 'text', text: piece });
+  };
+  while ((m = RE.exec(src))) {
+    const file = normalizeImagePath(m[1] || m[2] || m[3] || m[4] || '');
+    if (!file) continue;
+    pushText(src.slice(last, m.index));
+    last = m.index + m[0].length;
+    out.push({ kind: 'image', file });
+  }
+  pushText(src.slice(last));
+  return out;
+}
+
+function richSegments(items) {
+  return items.map((it) =>
+    it.kind === 'image'
+      ? { type: 'image', data: { file: toFileUri(it.file) } }
+      : { type: 'text', data: { text: it.text } },
+  );
+}
+
 // ------------------------------------------------------------------ channel
 /**
  * @param {object} opts
@@ -228,6 +292,7 @@ export function createChannel(opts) {
   let seq = 0;
   let lastEventAt = 0;
   let lastEventSummary = '';
+  let lastSpeakReason = '';
   let inboundCount = 0;
   let outboundCount = 0;
   let taskTimer = null;
@@ -250,21 +315,63 @@ export function createChannel(opts) {
   const napcatBat = () => String(cfg.qqNapcatBat || '').trim();
   const napcatUin = () => String(cfg.qqNapcatUin || cfg.qqSelfQQ || '').trim();
 
-  function launchNapcat() {
+  /** 找在跑的 NapCat（node.exe 命令行里带 napcat）。查不到返回空串，交给时间戳兜底。 */
+  function napcatPid() {
+    if (process.platform !== 'win32') return '';
+    try {
+      const out = execFileSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `$p = Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'napcat' } | Select-Object -First 1; if ($p) { $p.ProcessId }`,
+        ],
+        { encoding: 'utf8', timeout: 15000, windowsHide: true },
+      );
+      return String(out || '').trim();
+    } catch {
+      return '';
+    }
+  }
+
+  function launchNapcat(opts = {}) {
+    const force = Boolean(opts && opts.force);
     const bat = napcatBat();
     if (!bat) return { ok: false, error: '还没填 NapCat 启动脚本路径' };
     if (!existsSync(bat)) return { ok: false, error: '找不到：' + bat };
     const now = Date.now();
-    if (now - launcher.lastSpawnAt < 30000) return { ok: false, error: '刚拉起过，再等一会儿' };
+    // 窗口只要还开着就别再弹：直接查进程，重启 DSH 也认。
+    const pid = napcatPid();
+    if (pid) {
+      if (!force) {
+        launcher.lastSpawnAt = now;
+        state.napcatLastSpawnAt = now;
+        saveState();
+        return { ok: false, already: true, error: 'NapCat 已在运行（pid ' + pid + '），不重复弹窗口' };
+      }
+      // 手动点「立即拉起」：后台那个窗口是隐藏的，扫不了码，先关掉再起一个能看见的。
+      try {
+        execFileSync('taskkill', ['/PID', String(pid), '/F'], { stdio: 'ignore', timeout: 8000, windowsHide: true });
+      } catch {
+        return { ok: false, error: 'NapCat 在跑（pid ' + pid + '）但关不掉，先手动关掉再试' };
+      }
+    }
+    // 进程查不到（权限/超时）时，用落盘时间兜底，防止 45s 一轮狂拉；手动拉起不受这个限制。
+    const lastSpawn = Number(state.napcatLastSpawnAt || launcher.lastSpawnAt || 0);
+    if (!force && lastSpawn && now - lastSpawn < 60000) {
+      return { ok: false, error: '1 分钟内拉起过，先不重复弹窗口' };
+    }
     launcher.lastSpawnAt = now;
-    launcher.spawned += 1;
+    state.napcatLastSpawnAt = now;
+    saveState();
     try {
       const uin = napcatUin();
       const child = spawn(bat, uin ? ['-q', uin] : [], {
         cwd: dirname(bat),
         detached: true,
         stdio: 'ignore',
-        windowsHide: true,
+        windowsHide: !force,
         shell: process.platform === 'win32',
       });
       child.on('error', (e) => {
@@ -368,9 +475,21 @@ export function createChannel(opts) {
     try {
       handle = await agents.create({ sessionId: baseId, meta, agentOptions });
     } catch (e) {
-      const alt = baseId + '-' + Date.now().toString(36);
-      log('warn', '建会话失败（' + (e?.message ?? e) + '），换 id 重试：' + alt);
-      handle = await agents.create({ sessionId: alt, meta, agentOptions });
+      const msg = e?.message ?? String(e);
+      // 重启后旧会话还在持久化里，create 会撞车；用 resume 接回同一只，别再开新的。
+      if (agents.resume && /already exists|已存在/i.test(msg)) {
+        try {
+          handle = await agents.resume({ sessionId: baseId, resumeSessionId: baseId, meta, agentOptions });
+          log('info', '会话已存在，resume 接回：' + baseId);
+        } catch (e2) {
+          log('warn', 'resume 失败（' + (e2?.message ?? e2) + '），换 id 重试');
+          handle = await agents.create({ sessionId: baseId + '-' + Date.now().toString(36), meta, agentOptions });
+        }
+      } else {
+        const alt = baseId + '-' + Date.now().toString(36);
+        log('warn', '建会话失败（' + msg + '），换 id 重试：' + alt);
+        handle = await agents.create({ sessionId: alt, meta, agentOptions });
+      }
     }
     await handle.agent?.whenIdle?.();
     rec = {
@@ -511,11 +630,8 @@ export function createChannel(opts) {
       log('warn', '定时任务没有产出：' + task.at + ' ' + task.target);
       return;
     }
-    const parts = splitText(reply, Number(cfg.replyMaxChars) || 0);
-    await sendSegments(
-      chatId,
-      parts.map((t) => ({ type: 'text', data: { text: t } })),
-    );
+    const pieces = splitRichText(reply, Number(cfg.replyMaxChars) || 0);
+    await sendSegments(chatId, richSegments(pieces));
     log('info', '定时任务已发：' + task.at + ' ' + chatId + ' ' + task.topic);
   }
 
@@ -576,11 +692,10 @@ export function createChannel(opts) {
           continue;
         }
         const limit = Number(cfg.replyMaxChars) || 0;
-        const parts = splitText(reply, limit);
-        await sendSegments(
-          rec.chatId,
-          parts.map((t) => ({ type: 'text', data: { text: t } })),
-        );
+        const pieces = splitRichText(reply, limit);
+        await sendSegments(rec.chatId, richSegments(pieces));
+        state.lastSpeakAt = Date.now();
+        saveState();
         // 表情包：插件自己的骰子，掷到了就补一张
         try {
           const drawn = opts.drawEmoji?.();
@@ -602,6 +717,27 @@ export function createChannel(opts) {
     rec.queue.push(item);
     if (rec.queue.length > 8) rec.queue.splice(0, rec.queue.length - 8);
     void pump(rec);
+  }
+
+  /** 要不要叫醒 agent：私聊一律应；群里 @ 必应，其余看自动接话开关/关键词/概率/冷却。 */
+  function speakGate(ev, text, chatId) {
+    const self = String(ev.self_id ?? botQQ() ?? '');
+    let mentioned = false;
+    if (Array.isArray(ev.message)) {
+      mentioned = ev.message.some((s) => s && s.type === 'at' && !!self && String(s.data && s.data.qq) === self);
+    } else {
+      mentioned = !!self && String(ev.raw_message || '').indexOf('[CQ:at,qq=' + self + ']') >= 0;
+    }
+    if (chatId.indexOf('private-') === 0) return { ok: true, reason: '私聊' };
+    if (mentioned) return { ok: true, reason: '被@' };
+    if (!cfg.autoSpeakEnabled) return { ok: false, reason: '群里没@，自动接话关着' };
+    const cool = Number(cfg.autoSpeakCooldownMin) || 0;
+    if (cool > 0 && Date.now() - (state.lastSpeakAt || 0) <= cool * 60000) return { ok: false, reason: '冷却中' };
+    const kws = Array.isArray(cfg.autoSpeakKeywords) ? cfg.autoSpeakKeywords : [];
+    if (kws.some((k) => k && text.indexOf(k) >= 0)) return { ok: true, reason: '命中关键词' };
+    const chance = Math.max(0, Math.min(1, Number(cfg.autoSpeakChance) || 0));
+    if (chance > 0 && Math.random() < chance) return { ok: true, reason: '概率接话' };
+    return { ok: false, reason: '没中' };
   }
 
   function handleEvent(ev) {
@@ -637,6 +773,12 @@ export function createChannel(opts) {
     } catch {
       /* ignore */
     }
+    const gate = speakGate(ev, text, chatId);
+    if (!gate.ok) {
+      log('info', '跳过一条（' + gate.reason + '）' + chatId + ' ' + nickname + '：' + text.slice(0, 30));
+      return;
+    }
+    lastSpeakReason = gate.reason;
     void ensureChat(chatId)
       .then((rec) => enqueue(rec, { text, nickname, uid, at: Date.now() }))
       .catch((e) => log('warn', '处理消息失败：' + (e?.message ?? e)));
@@ -837,8 +979,10 @@ export function createChannel(opts) {
     stop,
     launch: launchNapcat,
     status,
-    handleEvent,
+        handleEvent,
+        speakGate,
     splitText,
+    splitRichText,
     dispose: () => {
       try {
         unsubscribe?.();

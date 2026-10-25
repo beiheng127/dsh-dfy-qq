@@ -955,8 +955,8 @@ export function apply(ctx, rawConfig = {}) {
       return sendJson(res, started.ok ? 200 : 500, { ...started, ...status() });
     }
     if (req.method === 'POST' && path === '/api/dfy-qq/channel/launch') {
-      const r = channel.launch();
-      return sendJson(res, r.ok ? 200 : 400, { ...r, ...status() });
+      const r = channel.launch({ force: true });
+      return sendJson(res, r.ok || r.already ? 200 : 400, { ...r, ...status() });
     }
     if (req.method === 'POST' && path === '/api/dfy-qq/channel/stop') {
       cfg = { ...cfg, qqEnabled: false };
