@@ -287,7 +287,13 @@ export function createChannel(opts) {
     const agents = agentFor();
     if (!agents) throw new Error('宿主没提供 agents 服务，没法建会话');
     const saved = state.chats[chatId];
-    const baseId = saved?.sessionId || 'dfyqq-' + chatId;
+    // 会话 id 前缀可配：默认 onebot-，直接对上旧 dsh-onebot-qq 的会话（历史全在），
+    // 这样"大肥鱼二号"还是原来那只，不是新开的一只。
+    const prefix = String(cfg.qqSessionPrefix || 'onebot-').trim() || 'onebot-';
+    const want = prefix + chatId.replace(/[^A-Za-z0-9-]/g, '-');
+    // 早期版本用过 dfyqq- 前缀，那些空会话没人要——直接换回统一前缀，别把新老割成两只。
+    const migrated = saved?.sessionId && !String(saved.sessionId).startsWith('dfyqq-');
+    const baseId = (migrated ? saved.sessionId : want);
     const selection = defaultModel();
     const agentOptions = selection ? { provider: selection.provider, model: selection.model } : {};
     const meta = { cwd: String(cfg.qqCwd || '').trim() ? resolve(workspace, cfg.qqCwd) : workspace };

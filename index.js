@@ -76,6 +76,7 @@ const DEFAULTS = {
   qqGroups: [],
   qqSelfQQ: '',
   qqCwd: '',
+  qqSessionPrefix: 'onebot-',
   qqTasks: '',
 };
 
@@ -112,6 +113,7 @@ export const Config = z
       qqGroups: z.array(z.string()).default([]).description('群白名单，空 = 全部群都接'),
       qqSelfQQ: z.string().default('').description('bot 自己的 QQ，防止自问自答'),
       qqCwd: z.string().default('').description('QQ 会话的工作目录（相对工作区），空 = 工作区根'),
+      qqSessionPrefix: z.string().default('onebot-').description('QQ 会话 id 前缀；默认 onebot- ，直接接上旧 dsh-onebot-qq 的老会话（历史聊天都在）'),
       qqTasks: z.string().default('').description('定时任务，一行一条：HH:MM | 群号或 private-QQ | 主题'),
     })
   : DEFAULTS;
