@@ -302,28 +302,10 @@ window.__ModuleLoader__.load({
               onChange: set('qqTasks'),
               placeholder: '09:00 | 123456789 | 早上问个好\n21:30 | private-934705339 | 提醒今天没写完的活',
             })),
-          h('div', { 'data-fq-row': '' },
-            h('button', {
-              'data-fq-btn': '',
-              disabled: busy,
-              onClick: async () => {
-                setBusy(true);
-                try {
-                  const r = await jpost('/channel/tasks', { qqTasks: String(form.qqTasks || '') });
-                  setSt(r);
-                  setMsg({ kind: 'ok', text: `定时任务已存：${(r.channel && r.channel.tasks ? r.channel.tasks.length : 0)} 条` });
-                } catch (e) {
-                  setMsg({ kind: 'err', text: '保存失败：' + String(e.message || e) });
-                } finally {
-                  setBusy(false);
-                }
-              },
-            }, '单独保存定时任务'),
-            h('span', { 'data-fq-note': '' },
-              st.channel
-                ? `已排 ${(st.channel.tasks || []).length} 条 · 今天已跑 ${st.channel.taskRuns || 0} 次`
-                : ''),
-          ),
+          h('div', { 'data-fq-note': '' },
+            st.channel
+              ? `已排 ${(st.channel.tasks || []).length} 条 · 今天已跑 ${st.channel.taskRuns || 0} 次（改完点顶部保存）`
+              : '改完点顶部保存即生效'),
         ),
 
         h('div', { 'data-fq-sec': '' },
