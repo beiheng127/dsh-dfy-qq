@@ -36,17 +36,53 @@ QQ 里的机器人和网页里聊天是两回事：
 
 ## 安装
 
-插件装在 DSH 的插件目录下（`~/.dsh/plugins/dsh-dfy-qq`），然后在 DSH 的设置里启用。
+仓库地址：<https://github.com/beiheng127/dsh-dfy-qq>
+
+它是个 **本地插件**，不走 npm 发布，装法是「clone 到插件目录 → 写进 profile → 重启」。
+
+### 1. 拿代码
 
 ```bash
-cd ~/.dsh/plugins
-git clone <this-repo> dsh-dfy-qq
-cd dsh-dfy-qq
+git clone https://github.com/beiheng127/dsh-dfy-qq.git ~/.dsh/plugins/dsh-dfy-qq
 ```
 
-然后重启 DSH。重启后 **设置 → 肥鱼·QQ** 会出现配置页。
+不想用 git 也行：在仓库页点 **Code → Download ZIP**，解压成 `~/.dsh/plugins/dsh-dfy-qq`（目录名必须一致）。
 
-> `cordis.patch.yml` 负责把插件注册进 profile，`package.json` 里的 `dsh.client` 负责把它注册成设置页的一个 tab。
+### 2. 注册进 profile
+
+DSH 不会自动扫 `plugins/` 目录，得在**你正在用的那个 profile** 的 `package.json` 里登记两处。profile 一般在 `~/.dsh/profiles/<名字>/package.json`（桌面版默认是 `desktop`）。
+
+```jsonc
+{
+  "dependencies": {
+    // 加这一行，路径换成你的实际路径
+    "dsh-dfy-qq": "link:C:/Users/you/.dsh/plugins/dsh-dfy-qq"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        // ...原有的一堆...
+        "dsh-dfy-qq"
+      ]
+    }
+  }
+}
+```
+
+改完在 profile 目录里跑一次：
+
+```bash
+cd ~/.dsh/profiles/desktop
+pnpm install
+```
+
+它会按 `link:` 建好 `node_modules/dsh-dfy-qq` 的软链。
+
+### 3. 重启 DSH
+
+重启后 **设置 → 肥鱼·QQ** 会出现配置页。
+
+> `cordis.patch.yml` 负责把插件挂进运行时，`package.json` 里的 `dsh.client` 负责把它注册成设置页的一个 tab。两处缺一个，效果就是"插件在、设置页不在"或者反过来。
 
 ---
 

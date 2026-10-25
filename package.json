@@ -1,7 +1,7 @@
 {
   "name": "dsh-dfy-qq",
-  "version": "0.2.0",
-  "description": "QQ 对话行为层：人设装载、群友关系档案、表情包大保底、主动接话",
+  "version": "0.5.0",
+  "description": "QQ 对话行为层：人设装载、群友关系档案、表情包择机发送、主动接话、子人格、群聊短期记忆",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -13,8 +13,8 @@
     "index.js",
     "client.js",
     "cordis.patch.yml",
-    "vendor",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20.0.0"
@@ -32,5 +32,18 @@
       ]
     }
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/beiheng127/dsh-dfy-qq.git"
+  },
+  "homepage": "https://github.com/beiheng127/dsh-dfy-qq",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "qq",
+    "onebot",
+    "persona",
+    "emoji"
+  ]
 }
