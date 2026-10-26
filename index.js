@@ -9,6 +9,7 @@
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, appendFileSync } from 'node:fs';
 import { join, dirname, resolve, extname } from 'node:path';
+import { homedir } from 'node:os';
 import { createChannel } from './channel.js';
 
 let defineTool = (options) => options;
@@ -27,6 +28,40 @@ try {
 }
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+
+/** 固定位置的配置快照：跟 profile / 工作区路径无关，插件关掉再开也不会丢。 */
+const SAVED_CONFIG_PATH = join(homedir(), '.dsh', 'dfy-qq-config.json');
+
+/** 只挑本版本认识的键，避免把 schema 之外的东西写进快照。 */
+function knownConfig(obj) {
+  const out = {};
+  for (const k of Object.keys(DEFAULTS)) if (obj && k in obj) out[k] = obj[k];
+  return out;
+}
+
+function sameJson(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * 合并配置，三层：
+ *   1. DEFAULTS
+ *   2. 上次落盘的快照（关掉插件、工作区路径变了也能捞回来）
+ *   3. 本次 patch 里被**改过**的键（相对上次快照；改回默认值也算改）
+ * 返回 { values, patch }，patch 用于下次判断"用户到底改没改"。
+ */
+function loadSavedConfig() {
+  const raw = readJson(SAVED_CONFIG_PATH, {});
+  if (!raw || typeof raw !== 'object') return { values: {}, patch: {} };
+  // 兼容早期直接存扁平键的版本
+  if (!raw.values && !raw.patch) return { values: knownConfig(raw), patch: {} };
+  return { values: knownConfig(raw.values || {}), patch: knownConfig(raw.patch || {}) };
+}
+
+function saveConfigSnapshot(values, patch) {
+  writeJson(SAVED_CONFIG_PATH, { version: 1, savedAt: new Date().toISOString(), values, patch });
+}
+
 
 function readJson(path, fallback) {
   try {
@@ -170,21 +205,39 @@ function buildIndexDoc(emojiDir, files) {
 }
 
 export function apply(ctx, rawConfig = {}) {
-  let cfg = { ...DEFAULTS, ...rawConfig };
+  const savedCfg = loadSavedConfig();
+  const patchNow = knownConfig(rawConfig || {});
+  // patch 里跟上次快照不一样的键 = 用户这次真的动过（含改回默认），以它为准；其余用快照兜底
+  const touched = {};
+  for (const k of Object.keys(patchNow)) {
+    if (!sameJson(patchNow[k], savedCfg.patch[k])) touched[k] = patchNow[k];
+    else if (!(k in savedCfg.values)) touched[k] = patchNow[k];
+  }
+  let cfg = { ...DEFAULTS, ...savedCfg.values, ...touched };
+
   let ws = resolve((cfg.workspace || process.cwd()).trim());
   let stateDir = cfg.stateDir ? resolve(ws, cfg.stateDir) : join(ws, '.dfyqq');
   let overridePath = join(stateDir, 'config.json');
   let statePath = join(stateDir, 'state.json');
 
   // 设置页写入的覆盖层优先于 cordis 配置
-  const override = readJson(overridePath, {});
-  cfg = { ...cfg, ...override };
+  const override = knownConfig(readJson(overridePath, {}));
+  // 老版本只往工作区里的 config.json 写过：现在它只给快照里没有的键兜底，
+  // 不再压过 patch（否则改了 patch 也不生效）。
+  const legacy = {};
+  for (const [k, v] of Object.entries(override)) {
+    if (!(k in savedCfg.values) && !(k in touched)) legacy[k] = v;
+  }
+  cfg = { ...cfg, ...legacy };
   if (override.workspace) {
     ws = resolve(override.workspace);
     stateDir = cfg.stateDir ? resolve(ws, cfg.stateDir) : join(ws, '.dfyqq');
     overridePath = join(stateDir, 'config.json');
     statePath = join(stateDir, 'state.json');
   }
+
+  // 把这次真正生效的配置写进固定快照：下次插件被关掉再开、patch 被清空也能捞回来
+  saveConfigSnapshot(knownConfig(cfg), patchNow);
 
   const state = readJson(statePath, { emojiMisses: 0, lastSpeakAt: 0 });
   for (const [k, v] of Object.entries({ chatMemory: {}, peopleSeen: {}, recentEmoji: [], personaUsage: {} })) {
@@ -926,6 +979,7 @@ export function apply(ctx, rawConfig = {}) {
       // 合并写回：磁盘上可能存着本版本不认识的键（旧版/新版配置），别一笔抹掉
       const onDisk = readJson(overridePath, {});
       const saved = writeJson(overridePath, { ...onDisk, ...cfg });
+      saveConfigSnapshot(knownConfig(cfg), knownConfig(rawConfig || {}));
       refresh();
       return sendJson(res, 200, { ok: saved, ...status() });
     }
