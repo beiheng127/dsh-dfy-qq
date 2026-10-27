@@ -98,9 +98,23 @@ window.__ModuleLoader__.load({
         }
       }, []);
 
+      const [voice, setVoice] = React.useState([]);
+      const loadVoice = React.useCallback(async () => {
+        try {
+          const r = await jget('/people-voice');
+          setVoice(r.rows || []);
+        } catch {
+          setVoice([]);
+        }
+      }, []);
+
       React.useEffect(() => {
         load();
       }, [load]);
+
+      React.useEffect(() => {
+        loadVoice();
+      }, [loadVoice]);
 
       const set = (k) => (e) => { setDirty(true); setForm((f) => ({ ...f, [k]: e.target.value })); };
       const setRaw = (k, v) => { setDirty(true); setForm((f) => ({ ...f, [k]: v })); };
@@ -231,6 +245,62 @@ window.__ModuleLoader__.load({
           h(Field, { label: '群友档案路径' },
             h('input', { 'data-fq-input': '', value: form.peopleFile || '', onChange: set('peopleFile') })),
           h('div', { 'data-fq-note': '' }, `实际：${rt.peopleFile}`),
+
+          h('div', { 'data-fq-row': '' },
+            h(Switch, {
+              on: form.peoplePersona === true,
+              onChange: (v) => setRaw('peoplePersona', v),
+            }),
+            h('span', { 'data-fq-label': '' }, '群友子人格（默认关）'),
+          ),
+          h('div', { 'data-fq-note': '' },
+            '打开后群里每句话都会给说话的人攒原话（去重、限量），攒够了能把某人的语气做成子人格，跟上面的群友档案共用一套认人。'),
+          h(Field, { label: '群友子人格放哪儿（相对工作区）' },
+            h('input', {
+              'data-fq-input': '',
+              value: form.peoplePersonaDir || '',
+              onChange: set('peoplePersonaDir'),
+              placeholder: 'personas/群友',
+            })),
+          h('div', { 'data-fq-row': '' },
+            h(Field, { label: '每人最多留几句原话' },
+              h('input', { 'data-fq-input': '', type: 'number', min: 5, value: form.voiceSamples, onChange: set('voiceSamples') })),
+            h(Field, { label: '每人原话总字数上限' },
+              h('input', { 'data-fq-input': '', type: 'number', min: 200, value: form.voiceChars, onChange: set('voiceChars') })),
+          ),
+          form.peoplePersona === true
+            ? h('div', { 'data-fq-sec': '' },
+                h('div', { 'data-fq-note': '' },
+                  voice.length === 0
+                    ? '还没攒到原话。开关保存后重启一次，群里有人说话就会开始记。'
+                    : `攒了 ${voice.length} 个人的原话（${rt.peoplePersonaDir || ''}）：`),
+                ...voice.slice(0, 12).map((v) => h('div', { 'data-fq-row': '' },
+                  h('span', { 'data-fq-label': '' }, `${v.nickname || '?'}（${v.account}）· ${v.samples} 句 / ${v.chars} 字`),
+                  h('div', { 'data-fq-grow': '' }),
+                  h('button', {
+                    'data-fq-btn': '',
+                    onClick: async () => {
+                      setMsg(null);
+                      try {
+                        const r = await jpost('/people-voice', { account: v.account });
+                        setMsg({ kind: r.ok ? 'ok' : 'err', text: r.ok ? `已生成 ${r.file}` : '生成失败' });
+                        await loadVoice();
+                        await load();
+                      } catch (e) {
+                        setMsg({ kind: 'err', text: '生成失败：' + String(e.message || e) });
+                      }
+                    },
+                  }, '生成子人格'),
+                  h('button', {
+                    'data-fq-btn': '',
+                    onClick: async () => {
+                      await jpost('/people-voice', { account: v.account, action: 'clear' });
+                      await loadVoice();
+                    },
+                  }, '清掉原话'),
+                )),
+              )
+            : null,
         ),
 
         h('div', { 'data-fq-sec': '', 'data-tab': 'interact' },

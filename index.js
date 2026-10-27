@@ -30,7 +30,8 @@ try {
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
 
 /** 固定位置的配置快照：跟 profile / 工作区路径无关，插件关掉再开也不会丢。 */
-const SAVED_CONFIG_PATH = join(homedir(), '.dsh', 'dfy-qq-config.json');
+const SAVED_CONFIG_PATH =
+  process.env.DFYQQ_CONFIG_PATH || join(homedir(), '.dsh', 'dfy-qq-config.json');
 
 /** 只挑本版本认识的键，避免把 schema 之外的东西写进快照。 */
 function knownConfig(obj) {
@@ -51,6 +52,8 @@ function sameJson(a, b) {
  * 返回 { values, patch }，patch 用于下次判断"用户到底改没改"。
  */
 function loadSavedConfig() {
+  // 测试/离线跑：连读都不读，免得拿主人的真配置
+  if (process.env.DFYQQ_NO_SAVE_CONFIG === '1') return { values: {}, patch: {} };
   const raw = readJson(SAVED_CONFIG_PATH, {});
   if (!raw || typeof raw !== 'object') return { values: {}, patch: {} };
   // 兼容早期直接存扁平键的版本
@@ -59,6 +62,8 @@ function loadSavedConfig() {
 }
 
 function saveConfigSnapshot(values, patch) {
+  // 测试/离线跑的时候别动主人真正的配置快照
+  if (process.env.DFYQQ_NO_SAVE_CONFIG === '1') return;
   writeJson(SAVED_CONFIG_PATH, { version: 1, savedAt: new Date().toISOString(), values, patch });
 }
 
@@ -99,6 +104,10 @@ const DEFAULTS = {
   personasDir: 'personas',
   personasEnabled: [],
   personaAuto: true,
+  peoplePersona: false,
+  peoplePersonaDir: 'personas/群友',
+  voiceSamples: 40,
+  voiceChars: 6000,
   memoryRounds: 20,
   memoryChats: 3,
   replyMaxChars: 220,
@@ -140,6 +149,10 @@ export const Config = z
       personasDir: z.string().default('personas').description('子人格目录（相对工作区），一个 .md 一个人格'),
       personasEnabled: z.array(z.string()).default([]).description('要启用的人格文件名；留空=目录里全部可用'),
       personaAuto: z.boolean().default(true).description('开启后每轮按语境自动挑 0~2 个人格'),
+      peoplePersona: z.boolean().default(false).description('群友子人格：开启后持续攒群友原话，能生成模仿他语气的子人格（默认关）'),
+      peoplePersonaDir: z.string().default('personas/群友').description('群友子人格存哪儿（相对工作区）'),
+      voiceSamples: z.natural().min(5).default(40).description('每个群友最多留多少句原话'),
+      voiceChars: z.natural().min(200).default(6000).description('每个群友原话总字数上限'),
       memoryRounds: z.natural().min(4).default(20).description('每个群保留最近多少条消息给模型当语境'),
       memoryChats: z.natural().min(1).default(3).description('同时保留几个群/会话的记忆'),
       replyMaxChars: z.natural().default(220).description('单条回复字数上限，0 = 不限'),
@@ -221,7 +234,8 @@ export function apply(ctx, rawConfig = {}) {
   let statePath = join(stateDir, 'state.json');
 
   // 设置页写入的覆盖层优先于 cordis 配置
-  const override = knownConfig(readJson(overridePath, {}));
+  const override =
+    process.env.DFYQQ_NO_SAVE_CONFIG === '1' ? {} : knownConfig(readJson(overridePath, {}));
   // 老版本只往工作区里的 config.json 写过：现在它只给快照里没有的键兜底，
   // 不再压过 patch（否则改了 patch 也不生效）。
   const legacy = {};
@@ -240,7 +254,7 @@ export function apply(ctx, rawConfig = {}) {
   saveConfigSnapshot(knownConfig(cfg), patchNow);
 
   const state = readJson(statePath, { emojiMisses: 0, lastSpeakAt: 0 });
-  for (const [k, v] of Object.entries({ chatMemory: {}, peopleSeen: {}, recentEmoji: [], personaUsage: {} })) {
+  for (const [k, v] of Object.entries({ chatMemory: {}, peopleSeen: {}, recentEmoji: [], personaUsage: {}, peopleVoice: {} })) {
     if (state[k] == null) state[k] = v;
   }
 
@@ -257,18 +271,22 @@ export function apply(ctx, rawConfig = {}) {
 
   /** 读人格目录：一个 .md 一份人格，标题或「简介：」行当摘要。 */
   function scanPersonas() {
-    const dir = resolve(ws, cfg.personasDir || 'personas');
+    const enabled = Array.isArray(cfg.personasEnabled) ? cfg.personasEnabled : [];
+    const roots = [{ dir: resolve(ws, cfg.personasDir || 'personas'), prefix: '', group: '本机' }];
+    if (cfg.peoplePersona) {
+      roots.push({ dir: resolve(ws, cfg.peoplePersonaDir || 'personas/群友'), prefix: '群友/', group: '群友' });
+    }
+    const out = [];
+    for (const root of roots) {
     let entries = [];
     try {
-      entries = readdirSync(dir, { withFileTypes: true });
+      entries = readdirSync(root.dir, { withFileTypes: true });
     } catch {
-      return [];
+      continue;
     }
-    const enabled = Array.isArray(cfg.personasEnabled) ? cfg.personasEnabled : [];
-    const out = [];
     for (const e of entries) {
       if (!e.isFile() || !/\.(md|txt)$/i.test(e.name)) continue;
-      const abs = join(dir, e.name);
+      const abs = join(root.dir, e.name);
       let text = '';
       try {
         text = readFileSync(abs, 'utf8');
@@ -281,12 +299,19 @@ export function apply(ctx, rawConfig = {}) {
         (/(?:^|\n)(?:简介|一句话)[：:]\s*(.+)/.exec(text) || [])[1] ||
         '';
       out.push({
-        file: e.name,
+        file: root.prefix + e.name,
+        group: root.group,
         title: title.trim(),
         summary: summary.trim().slice(0, 80),
         text,
-        on: enabled.length === 0 ? true : enabled.includes(e.name),
+        on:
+          root.group === '群友'
+            ? !enabled.includes(root.prefix + e.name)
+            : enabled.length === 0
+              ? true
+              : enabled.includes(root.prefix + e.name) || enabled.includes(e.name),
       });
+    }
     }
     out.sort((a, b) => a.file.localeCompare(b.file));
     return out;
@@ -476,9 +501,29 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   /** 记一条进来的群消息：短期记忆 + 见过的号。不改群友档案，只在提示里列出。 */
+  /** 群友原话取样：只在开了群友子人格后记，去重、限量，状态文件别涨爆。 */
+  function rememberVoice(uid, who, body) {
+    const text = String(body || '').trim();
+    if (uid.length < 4 || text.length < 2) return;
+    if (/^[\/#!~]/.test(text)) return;
+    const rec = (state.peopleVoice[uid] ||= { nickname: who, samples: [], chars: 0 });
+    rec.nickname = who || rec.nickname;
+    rec.updatedAt = Date.now();
+    if ((rec.samples || []).some((s) => s.text === text)) return;
+    rec.samples.push({ t: Date.now(), text });
+    rec.chars = (rec.chars || 0) + text.length;
+    const cap = Math.max(5, Number(cfg.voiceSamples) || 40);
+    const charCap = Math.max(200, Number(cfg.voiceChars) || 6000);
+    while (rec.samples.length > cap || rec.chars > charCap) {
+      const drop = rec.samples.shift();
+      rec.chars -= (drop?.text?.length || 0);
+    }
+    if (rec.chars < 0) rec.chars = 0;
+  }
+
   function rememberInbound(p = {}) {
     const key = String(p.groupId || p.chatId || p.userId || p.user_id || 'default').slice(0, 40);
-    const who = String(p.nickname || p.senderName || p.username || p.userId || '某人').slice(0, 14);
+    const who = String(p.nickname || p.senderName || p.username || p.userId || p.user_id || p.account || '某人').slice(0, 14);
     const body = String(p.text || '')
       .replace(/\s+/g, ' ')
       .trim()
@@ -499,12 +544,14 @@ export function apply(ctx, rawConfig = {}) {
           .forEach((k) => delete state.chatMemory[k]);
       }
     }
-    const uid = String(p.userId || p.user_id || '').trim();
+    const uid = String(p.userId || p.user_id || p.account || p.uid || p.qq || '').trim();
     if (uid) {
       const rec = (state.peopleSeen[uid] ||= { nickname: who, count: 0, firstAt: Date.now() });
       rec.nickname = who;
       rec.count = (rec.count || 0) + 1;
       rec.lastAt = Date.now();
+      // 机器人自己的号不算群友
+      if (body && uid !== String(cfg.qqSelfQQ || '')) rememberVoice(uid, who, body);
     }
     if (body || uid) saveState();
   }
@@ -516,6 +563,83 @@ export function apply(ctx, rawConfig = {}) {
     } catch {
       return { text: '', path: abs };
     }
+  }
+
+  /** 从原话里挑高频短语，粗略当口头禅。 */
+  function frequentPhrases(samples, limit = 8) {
+    const counts = new Map();
+    for (const s of samples) {
+      const clean = String(s.text || '').replace(/[^\u4e00-\u9fa5a-zA-Z0-9]+/g, ' ');
+      for (const part of clean.split(/\s+/)) {
+        for (let n = 2; n <= 4; n += 1) {
+          for (let i = 0; i + n <= part.length; i += 1) {
+            const g = part.slice(i, i + n);
+            if (/^[0-9]+$/.test(g)) continue;
+            counts.set(g, (counts.get(g) || 0) + 1);
+          }
+        }
+      }
+    }
+    const ranked = [...counts.entries()]
+      .filter(([, c]) => c >= 3)
+      .sort((a, b) => b[1] * b[0].length - a[1] * a[0].length);
+    const picked = [];
+    for (const [g] of ranked) {
+      if (picked.some((p) => p.includes(g) || g.includes(p))) continue;
+      picked.push(g);
+      if (picked.length >= limit) break;
+    }
+    return picked;
+  }
+
+  /** 把某个群友的原话写成一份子人格文档。 */
+  function buildPeoplePersona(uid, rec) {
+    const dir = resolve(ws, cfg.peoplePersonaDir || 'personas/群友');
+    const samples = (rec.samples || []).slice();
+    const nick = String(rec.nickname || uid).replace(/[\\/:*?"<>|\s]+/g, '').slice(0, 20) || uid;
+    const file = `${nick}-${uid}.md`;
+    const abs = join(dir, file);
+    const avg = samples.length ? Math.round(samples.reduce((n, s) => n + s.text.length, 0) / samples.length) : 0;
+    const longest = samples.reduce((n, s) => Math.max(n, s.text.length), 0);
+    const phrases = frequentPhrases(samples);
+    const p = readPeople();
+    const row = (p.text.split('\n').find((l) => l.startsWith(`| ${uid} `)) || '').trim();
+    const recent = samples.slice(-Math.min(24, samples.length));
+    const lines = [
+      `# ${rec.nickname || uid}（群友子人格）`,
+      '',
+      `> 简介：借 ${rec.nickname || uid} 的语气说话——只借腔调和节奏，不扮他本人。`,
+      '',
+      '## 这是谁',
+      '',
+      `- 账号：${uid}（认号不认昵称）`,
+      `- 昵称：${rec.nickname || '未知'}（会变）`,
+      `- 档案：${row || '群友档案里还没写他这一行'}`,
+      `- 样本：${samples.length} 句 / ${rec.chars || 0} 字，最近更新 ${new Date(rec.updatedAt || Date.now()).toLocaleString('zh-CN')}`,
+      '',
+      '## 语言指纹（原话自动统计，别当定论）',
+      '',
+      `- 平均每句 ${avg} 字，最长一句 ${longest} 字`,
+      `- 常出现的词/短语：${phrases.length ? phrases.join('、') : '（样本还不够，多攒几句）'}`,
+      '',
+      '## 原话样本（照着这个语气，别照抄内容）',
+      '',
+      ...recent.map((s) => `- ${s.text}`),
+      '',
+      '## 用的时候',
+      '',
+      '- 只借语气、断句、用词习惯，说的内容自己现编；',
+      '- 不冒充他本人发言、不替他承诺、不抖他的私事；',
+      '- 群里对不上号就先问，别自己认。',
+      '',
+    ];
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(abs, lines.join('\n'), 'utf8');
+    } catch (e) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+    return { ok: true, file: `群友/${file}`, abs, samples: samples.length };
   }
 
   // ---- system prompt ----
@@ -695,6 +819,42 @@ export function apply(ctx, rawConfig = {}) {
       } catch (e) {
         return `写入失败：${e?.message ?? e}`;
       }
+    },
+  );
+
+  tool(
+    'dfy_people_persona',
+    '群友子人格：看看谁攒了原话、把某个群友的语气整理成一份子人格文档。默认关闭，先让主人在设置页开「群友子人格」。',
+    {
+      type: 'object',
+      properties: {
+        action: { type: 'string', description: 'list=看谁攒了样本；build=生成/刷新某个人的子人格' },
+        account: { type: 'string', description: 'QQ 号或 openid（build 必填）' },
+        nickname: { type: 'string', description: '顺手更新昵称' },
+      },
+      additionalProperties: false,
+    },
+    async (args) => {
+      refresh();
+      if (!cfg.peoplePersona) return '群友子人格开关关着：先去设置页 → 肥鱼·QQ → 认人，把「群友子人格」打开。';
+      const act = String(args.action || (args.account ? 'build' : 'list'));
+      const rows = Object.entries(state.peopleVoice || {});
+      if (act === 'list') {
+        if (rows.length === 0) return '还没记到任何群友原话。开关打开后，群里有人说话就会自动攒。';
+        return rows
+          .sort((a, b) => (b[1].updatedAt || 0) - (a[1].updatedAt || 0))
+          .map(([uid, r]) => `- ${uid}｜${r.nickname || '?'}｜${(r.samples || []).length} 句 / ${r.chars || 0} 字`)
+          .join('\n');
+      }
+      const uid = String(args.account || '').trim();
+      if (!uid) return '要 build 得给 account（QQ 号）。';
+      const rec = state.peopleVoice[uid];
+      if (!rec || (rec.samples || []).length === 0) return `没记到 ${uid} 的原话，先在群里让他说几句。`;
+      if (args.nickname) rec.nickname = String(args.nickname).slice(0, 14);
+      const made = buildPeoplePersona(uid, rec);
+      if (!made.ok) return `写文件失败：${made.error}`;
+      refresh();
+      return `已生成 ${made.abs}\n样本 ${made.samples} 句。人格列表里它叫「${made.file}」。`;
     },
   );
 
@@ -961,6 +1121,8 @@ export function apply(ctx, rawConfig = {}) {
       memoryChats: Object.keys(state.chatMemory || {}).length,
       memoryRows: Object.values(state.chatMemory || {}).reduce((n, a) => n + a.length, 0),
       peopleSeen: Object.keys(state.peopleSeen || {}).length,
+      peopleVoice: Object.keys(state.peopleVoice || {}).length,
+      peoplePersonaDir: resolve(ws, cfg.peoplePersonaDir || 'personas/群友'),
     },
     channel: channel.status(),
   });
@@ -990,6 +1152,40 @@ export function apply(ctx, rawConfig = {}) {
       } catch (e) {
         return sendJson(res, 500, { ok: false, error: e?.message ?? String(e) });
       }
+    }
+    if (req.method === 'GET' && path === '/api/dfy-qq/people-voice') {
+      refresh();
+      const rows = Object.entries(state.peopleVoice || {}).map(([uid, r]) => ({
+        account: uid,
+        nickname: r.nickname || '',
+        samples: (r.samples || []).length,
+        chars: r.chars || 0,
+        updatedAt: r.updatedAt || 0,
+      }));
+      rows.sort((a, b) => b.updatedAt - a.updatedAt);
+      return sendJson(res, 200, {
+        ok: true,
+        enabled: !!cfg.peoplePersona,
+        dir: resolve(ws, cfg.peoplePersonaDir || 'personas/群友'),
+        rows,
+      });
+    }
+    if (req.method === 'POST' && path === '/api/dfy-qq/people-voice') {
+      const body = await readBody(req);
+      const uid = String(body.account || '').trim();
+      if (!uid) return sendJson(res, 400, { ok: false, error: '缺 account' });
+      if (body.action === 'clear') {
+        delete state.peopleVoice[uid];
+        saveState();
+        return sendJson(res, 200, { ok: true });
+      }
+      const rec = state.peopleVoice[uid];
+      if (!rec) return sendJson(res, 404, { ok: false, error: '没记到这个人的原话' });
+      if (body.nickname) rec.nickname = String(body.nickname).slice(0, 14);
+      const made = buildPeoplePersona(uid, rec);
+      if (!made.ok) return sendJson(res, 500, { ok: false, error: made.error });
+      refresh();
+      return sendJson(res, 200, { ok: true, file: made.file, abs: made.abs, samples: made.samples });
     }
     if (req.method === 'POST' && path === '/api/dfy-qq/reset-pity') {
       state.emojiMisses = 0;

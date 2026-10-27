@@ -1,6 +1,6 @@
 {
   "name": "dsh-dfy-qq",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "QQ 对话行为层：人设装载、群友关系档案、表情包择机发送、主动接话、子人格、群聊短期记忆",
   "type": "module",
   "main": "index.js",

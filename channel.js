@@ -769,7 +769,7 @@ export function createChannel(opts) {
     lastEventAt = Date.now();
     lastEventSummary = chatId + ' ' + nickname + '：' + text.slice(0, 60);
     try {
-      opts.rememberInbound?.({ account: uid, nickname, chatId, text, at: Date.now() });
+      opts.rememberInbound?.({ account: uid, userId: uid, nickname, chatId, text, at: Date.now() });
     } catch {
       /* ignore */
     }
