@@ -60,7 +60,9 @@ function encodeFrame(opcode, payload) {
 function attachFrames(socket, { onText, onClose }) {
   let buf = Buffer.alloc(0);
   let frags = [];
+  socket.__lastSeen = Date.now();
   socket.on('data', (chunk) => {
+    socket.__lastSeen = Date.now();
     buf = Buffer.concat([buf, chunk]);
     for (;;) {
       if (buf.length < 2) return;
@@ -312,6 +314,24 @@ export function createChannel(opts) {
   let loginInfo = { ok: false, at: 0, uin: '', nickname: '' };
   const launcher = { spawned: 0, lastSpawnAt: 0, lastError: '' };
 
+  /** 保活：每 20 秒给连着的 socket 发 ping；90 秒没有任何入站就主动断开，等 NapCat 重连。 */
+  function heartbeat() {
+    const now = Date.now();
+    for (const socket of sockets) {
+      const last = socket.__lastSeen || 0;
+      if (last && now - last > 90000) {
+        log('warn', 'OneBot 心跳超时（90s 无入站），主动断开等待重连');
+        try {
+          socket.destroy();
+        } catch {}
+        continue;
+      }
+      try {
+        socket.write(encodeFrame(0x9, Buffer.alloc(0)));
+      } catch {}
+    }
+  }
+
   const napcatBat = () => String(cfg.qqNapcatBat || '').trim();
   const napcatUin = () => String(cfg.qqNapcatUin || cfg.qqSelfQQ || '').trim();
 
@@ -468,6 +488,7 @@ export function createChannel(opts) {
     // 早期版本用过 dfyqq- 前缀，那些空会话没人要——直接换回统一前缀，别把新老割成两只。
     const migrated = saved?.sessionId && !String(saved.sessionId).startsWith('dfyqq-');
     const baseId = (migrated ? saved.sessionId : want);
+    await reviveArchived(baseId);
     const selection = defaultModel();
     const agentOptions = selection ? { provider: selection.provider, model: selection.model } : {};
     const meta = { cwd: String(cfg.qqCwd || '').trim() ? resolve(workspace, cfg.qqCwd) : workspace };
@@ -508,6 +529,39 @@ export function createChannel(opts) {
     saveState();
     log('info', 'QQ 会话就绪：' + chatId + ' → ' + rec.sessionId);
     return rec;
+  }
+
+  // 会话一旦被归档，宿主的 archived-session-gate 会拒掉每一条新消息
+  // （turn/end = blocked，模型一次都不会被调用），QQ 侧就只剩「连上了但不回话」。
+  // 这里在投递前先把它从归档里救回来。
+  async function reviveArchived(sessionId) {
+    const id = String(sessionId || '').trim();
+    if (!id) return false;
+    let registry = null;
+    try {
+      registry = ctx.get?.('workspaceRegistry') || null;
+    } catch {
+      registry = null;
+    }
+    if (!registry) return false;
+    let archived = [];
+    try {
+      archived = Array.isArray(registry.archivedSessionIds) ? registry.archivedSessionIds.map(String) : [];
+    } catch {
+      archived = [];
+    }
+    if (!archived.includes(id)) return false;
+    try {
+      if (typeof registry.unarchiveSession === 'function') {
+        await registry.unarchiveSession(id);
+        log('warn', '会话原先被归档，已恢复：' + id);
+        return true;
+      }
+      log('warn', '会话在归档名单里，但宿主没提供 unarchiveSession：' + id);
+    } catch (e) {
+      log('warn', '恢复归档会话失败（' + (e?.message ?? e) + '）：' + id);
+    }
+    return false;
   }
 
   function onSessionEvent(session, event) {
@@ -668,6 +722,7 @@ export function createChannel(opts) {
         const item = rec.queue.shift();
         rec.collecting = [];
         const line = `[${clockText(item.at)} ${item.nickname || item.uid || '群友'}${item.uid ? '(' + item.uid + ')' : ''}] ${item.text}`;
+        await reviveArchived(rec.sessionId);
         try {
           await rec.agent.whenIdle?.();
         } catch {
@@ -696,6 +751,17 @@ export function createChannel(opts) {
         await sendSegments(rec.chatId, richSegments(pieces));
         state.lastSpeakAt = Date.now();
         saveState();
+        // 语音条：模型排了话就用 edge-tts 合成一条 record 发出去
+        try {
+          const voice = await opts.takeVoice?.();
+          if (voice?.file) {
+            await sleep(200);
+            const vuri = 'file:///' + String(voice.file).replace(/\\/g, '/').replace(/^\/+/, '');
+            await sendSegments(rec.chatId, [{ type: 'record', data: { file: vuri } }]);
+          }
+        } catch (e) {
+          log('warn', '发语音失败：' + (e?.message ?? e));
+        }
         // 表情包：插件自己的骰子，掷到了就补一张
         try {
           const drawn = opts.drawEmoji?.();
@@ -868,6 +934,52 @@ export function createChannel(opts) {
           },
         });
       });
+      srv.on('upgrade', (req, socket) => {
+        try {
+          const path = String(req.url || '');
+          if (!path.startsWith('/onebot/v11/ws')) {
+            socket.destroy();
+            return;
+          }
+          const key = req.headers['sec-websocket-key'];
+          if (!key) {
+            socket.destroy();
+            return;
+          }
+          const tok = accessToken();
+          if (tok) {
+            const url = new URL(path, 'http://127.0.0.1');
+            const got =
+              url.searchParams.get('access_token') ||
+              String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+            if (got !== tok) {
+              socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+              socket.destroy();
+              return;
+            }
+          }
+          socket.write(
+            'HTTP/1.1 101 Switching Protocols\r\n' +
+              'Upgrade: websocket\r\n' +
+              'Connection: Upgrade\r\n' +
+              'Sec-WebSocket-Accept: ' +
+              acceptKey(String(key)) +
+              '\r\n\r\n',
+          );
+          try { socket.setNoDelay(true); } catch { /* ignore */ }
+          sockets.add(socket);
+          log('info', 'OneBot 已连接（upgrade）：' + (socket.remoteAddress || '?'));
+          attachFrames(socket, {
+            onText: (t) => onClientMessage(socket, t),
+            onClose: () => {
+              sockets.delete(socket);
+              log('info', 'OneBot 断开');
+            },
+          });
+        } catch (e) {
+          try { socket.destroy(); } catch { /* ignore */ }
+        }
+      });
       srv.on('error', (e) => {
         lastError = '监听 ' + host + ':' + port + ' 失败：' + (e?.message ?? e);
         running = false;
@@ -881,6 +993,7 @@ export function createChannel(opts) {
         if (!taskTimer) taskTimer = setInterval(tickTasks, 20000);
         if (!monitorTimer) {
           monitorTimer = setInterval(() => {
+            heartbeat();
             watchNapcat();
             void probeLogin();
           }, 20000);

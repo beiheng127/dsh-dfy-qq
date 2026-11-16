@@ -7,10 +7,11 @@
  * 4. 主动接话：给通道层 shouldSpeak()
  * 5. 设置页：/api/dfy-qq/* + client.js 注册到「设置」左侧导航
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, appendFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, appendFileSync , renameSync} from 'node:fs';
 import { join, dirname, resolve, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { createChannel } from './channel.js';
+import { execFile } from 'node:child_process';
 
 let defineTool = (options) => options;
 try {
@@ -95,6 +96,12 @@ const DEFAULTS = {
   emojiDir: '',
   emojiIndexFile: 'kb/表情包-索引.md',
   emojiChance: 0.5,
+  voiceEnabled: true,
+  voiceName: 'zh-CN-XiaoyiNeural',
+  voiceMaxChars: 120,
+  voiceRate: '+18%',
+  voicePitch: '+22Hz',
+  voicePython: '',
   emojiPity: 4,
   stateDir: '',
   autoSpeakChance: 0.12,
@@ -108,7 +115,7 @@ const DEFAULTS = {
   peoplePersonaDir: 'personas/群友',
   voiceSamples: 40,
   voiceChars: 6000,
-  memoryRounds: 20,
+  memoryRounds: 12,
   memoryChats: 3,
   replyMaxChars: 220,
   emojiRecentSkip: 8,
@@ -140,6 +147,12 @@ export const Config = z
       emojiDir: z.string().default('').description('表情包文件夹；相对路径按工作区解析，留空用 <工作区>/emoji'),
       emojiIndexFile: z.string().default('kb/表情包-索引.md').description('表情包索引（相对 workspace）'),
       emojiChance: z.number().min(0).max(1).default(0.5).description('闲聊发图概率'),
+      voiceEnabled: z.boolean().default(true).description('允许发语音条'),
+      voiceName: z.string().default('zh-CN-XiaoyiNeural').description('edge-tts 音色'),
+      voiceMaxChars: z.natural().min(10).default(120).description('单条语音最多字数'),
+      voiceRate: z.string().default('+18%').description('语速，如 +18%'),
+      voicePitch: z.string().default('+22Hz').description('音调，如 +22Hz'),
+      voicePython: z.string().default('').description('python 路径；空 = 用 PATH 里的 python'),
       emojiPity: z.natural().min(0).default(4).description('大保底：连续 N 轮没发，下一轮强制'),
       stateDir: z.string().default('').description('状态目录；留空 <workspace>/.dfyqq'),
       autoSpeakChance: z.number().min(0).max(1).default(0.12).description('没被 @ 时接话概率'),
@@ -153,7 +166,7 @@ export const Config = z
       peoplePersonaDir: z.string().default('personas/群友').description('群友子人格存哪儿（相对工作区）'),
       voiceSamples: z.natural().min(5).default(40).description('每个群友最多留多少句原话'),
       voiceChars: z.natural().min(200).default(6000).description('每个群友原话总字数上限'),
-      memoryRounds: z.natural().min(4).default(20).description('每个群保留最近多少条消息给模型当语境'),
+      memoryRounds: z.natural().min(4).default(12).description('每个群保留最近多少条消息给模型当语境'),
       memoryChats: z.natural().min(1).default(3).description('同时保留几个群/会话的记忆'),
       replyMaxChars: z.natural().default(220).description('单条回复字数上限，0 = 不限'),
       emojiRecentSkip: z.natural().default(8).description('最近发过的这么多张，下次尽量避开'),
@@ -521,6 +534,66 @@ export function apply(ctx, rawConfig = {}) {
     if (rec.chars < 0) rec.chars = 0;
   }
 
+
+  /** 把群友档案里「插件见过的号」那一小节按当前 state 重写；只碰这一小节，别的不动。 */
+  let lastSeenDocAt = 0;
+  let seenDocDirty = 0;
+  function rewriteSeenSection() {
+    const abs = resolve(ws, cfg.peopleFile);
+    let text;
+    try {
+      text = readFileSync(abs, "utf8");
+    } catch {
+      return { ok: false, error: "peopleFile 读不到" };
+    }
+    const seen = Object.entries(state.peopleSeen || {})
+      .sort((a, b) => (b[1].lastAt || 0) - (a[1].lastAt || 0))
+      .slice(0, 30);
+    if (seen.length === 0) return { ok: false, error: "没有见过的号" };
+    const body =
+      "### 插件见过的号（档案里可能还没写）\n\n" +
+      seen
+        .map(([uid, r]) => {
+          const mins = Math.round((Date.now() - (r.lastAt || 0)) / 60000);
+          const known = text.includes(uid) ? " · 档案里有" : "";
+          return `- ${uid}｜${r.nickname}｜出现 ${r.count} 次｜最近 ${mins} 分钟前${known}`;
+        })
+        .join("\n") +
+      "\n\n对不上的别猜，按号认；档案里没有的，等主人确认再加。\n\n";
+    const head = "### 插件见过的号";
+    const start = text.indexOf(head);
+    let next;
+    if (start >= 0) {
+      const rest = text.indexOf("\n## ", start + head.length);
+      const rest2 = text.indexOf("\n### ", start + head.length);
+      const cands = [rest, rest2].filter((n) => n > start);
+      next = cands.length ? Math.min(...cands) + 1 : text.length;
+      const tail = start >= 0 && next < text.length ? text.slice(next) : "";
+      text = text.slice(0, start) + body + tail;
+    } else {
+      text = text.trimEnd() + "\n\n" + body;
+    }
+    try {
+      writeFileSync(abs, text, "utf8");
+      lastSeenDocAt = Date.now();
+      seenDocDirty = 0;
+      return { ok: true, path: abs, count: seen.length };
+    } catch (e) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+  }
+
+  /** 攒够条目或隔够时间才重写，别每条消息都动磁盘。 */
+  function maybeUpdatePeopleDoc(force = false) {
+    seenDocDirty += 1;
+    const every = Math.max(1, Number(cfg.peopleDocEvery) || 12);
+    const gapMs = Math.max(60, Number(cfg.peopleDocMinGapSec) || 300) * 1000;
+    if (!force) {
+      if (seenDocDirty < every && Date.now() - lastSeenDocAt < gapMs) return null;
+    }
+    return rewriteSeenSection();
+  }
+
   function rememberInbound(p = {}) {
     const key = String(p.groupId || p.chatId || p.userId || p.user_id || 'default').slice(0, 40);
     const who = String(p.nickname || p.senderName || p.username || p.userId || p.user_id || p.account || '某人').slice(0, 14);
@@ -554,6 +627,11 @@ export function apply(ctx, rawConfig = {}) {
       if (body && uid !== String(cfg.qqSelfQQ || '')) rememberVoice(uid, who, body);
     }
     if (body || uid) saveState();
+    try {
+      maybeUpdatePeopleDoc();
+    } catch {
+      /* 档案更新失败不影响回话 */
+    }
   }
 
   function readPeople() {
@@ -592,6 +670,29 @@ export function apply(ctx, rawConfig = {}) {
     return picked;
   }
 
+
+  /** 从原话里粗算说话风格，写进群友子人格，样本不足就老实说不准。 */
+  function describeStyle(samples) {
+    if (!samples.length) return ['（还没样本，先别下结论）'];
+    const texts = samples.map((s) => String(s.text || ""));
+    const n = texts.length;
+    const len = texts.reduce((a, t) => a + t.length, 0) / n;
+    const q = texts.filter((t) => /[?？]/.test(t)).length / n;
+    const ex = texts.filter((t) => /[!！]/.test(t)).length / n;
+    const bracket = texts.filter((t) => /[（(【\[]/.test(t)).length / n;
+    const laugh = texts.filter((t) => /哈哈|嘿嘿|噗|草|笑死|233/.test(t)).length / n;
+    const dots = texts.filter((t) => /…|\.\.\.|。。。/.test(t)).length / n;
+    const out = [];
+    out.push(len <= 6 ? "句子极短，爱一两个字往外蹦" : len <= 14 ? "句子偏短，一次说一件事" : "句子偏长，愿意铺开讲");
+    if (q >= 0.25) out.push("爱反问、爱追问（问句占比 " + Math.round(q * 100) + "%）");
+    if (ex >= 0.2) out.push("情绪外放，感叹号多");
+    if (bracket >= 0.15) out.push("习惯加括号补一句内心戏或备注");
+    if (laugh >= 0.15) out.push("爱笑，常用「哈哈/笑死」类");
+    if (dots >= 0.15) out.push("爱用省略号，话留半截");
+    if (n < 12) out.push("（样本才 " + n + " 句，这些特征先当参考，别当定论）");
+    return out;
+  }
+
   /** 把某个群友的原话写成一份子人格文档。 */
   function buildPeoplePersona(uid, rec) {
     const dir = resolve(ws, cfg.peoplePersonaDir || 'personas/群友');
@@ -621,6 +722,10 @@ export function apply(ctx, rawConfig = {}) {
       '',
       `- 平均每句 ${avg} 字，最长一句 ${longest} 字`,
       `- 常出现的词/短语：${phrases.length ? phrases.join('、') : '（样本还不够，多攒几句）'}`,
+      '',
+      '## 性格推断（原话统计出来的，样本越多越准）',
+      '',
+      ...describeStyle(samples).map((t) => `- ${t}`),
       '',
       '## 原话样本（照着这个语气，别照抄内容）',
       '',
@@ -661,7 +766,7 @@ export function apply(ctx, rawConfig = {}) {
       text: () => {
         const list = activePersonas();
         if (list.length === 0) return '';
-        const lines = list.map((p) => `- ${p.file}｜${p.title}${p.summary ? '：' + p.summary : ''}`).join('\n');
+        const lines = list.map((p) => `- ${p.file}｜${p.title}`).join('\n');
         const head =
           `## 可切换的子人格（${list.length} 个，目录 \`${resolve(ws, cfg.personasDir || 'personas')}\`）\n\n` + lines + '\n\n';
         const base =
@@ -687,7 +792,7 @@ export function apply(ctx, rawConfig = {}) {
         const p = readPeople();
         const seen = Object.entries(state.peopleSeen || {})
           .sort((a, b) => (b[1].lastAt || 0) - (a[1].lastAt || 0))
-          .slice(0, 20);
+          .slice(0, 8);
         const seenBlock =
           seen.length === 0
             ? ''
@@ -722,7 +827,8 @@ export function apply(ctx, rawConfig = {}) {
         }
         return (
           `## 表情包（本轮不发）\n\n` +
-          `插件已经替你掷过骰子了：这一轮不发图，纯文字。别调 \`dfy_emoji_draw\`。\n` +
+          `插件已经替你掷过骰子了：这一轮不主动发图，纯文字。别为了凑热闹调 \`dfy_emoji_draw\`。\n` +
+          `例外：主人这一轮明确要看图（「发个表情包」「来一张」「发张图」这类）——直接 \`dfy_emoji_draw({"force": true})\` 抽一张发出去，不受上面的骰子限制。\n` +
           `图库 ${emojiFiles.length} 张。`
         );
       },
@@ -770,6 +876,19 @@ export function apply(ctx, rawConfig = {}) {
       },
     });
 
+    systemPrompt.context({
+      name: 'dfyqq:voice',
+      order: 86,
+      text: () =>
+        cfg.voiceEnabled
+          ? '## 语音条（dfy_voice_say）\n\n' +
+            '想真正"说一句"的时候调 `dfy_voice_say({ text, mood })`：文本先进队列，本轮文字回复发完后会跟一条 mp3 语音条。\n\n' +
+            '- 短：一句 15~40 字最像人，别把整段话念出来。\n' +
+            '- 文本里要带语气词（嘛/哼/呀/……），edge-tts 没有情绪开关，全靠语调和标点撑。\n' +
+            '- mood 按语境挑：soft 撒娇 / tsun 傲娇 / hype 兴奋 / calm 温柔 / snark 吐槽 / sad 委屈。\n' +
+            '- 不是每条都配语音。想撒娇、想怼、想起哄的时候再用。'
+          : '',
+    });
   // ---- 工具 ----
   const tool = (name, description, parameters, execute) =>
     ctx.tools.register(
@@ -891,6 +1010,31 @@ export function apply(ctx, rawConfig = {}) {
   );
 
   tool(
+    'dfy_voice_say',
+    '用语音条把这句话说出来：传要说的文本，插件会在下一条回复后合成语音并发出去（edge-tts）。适合主人让你"说句话"的时候。',
+    {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '要说的话，短一点更像人，默认截到 voiceMaxChars 字' },
+        mood: {
+          type: 'string',
+          enum: ['soft', 'tsun', 'hype', 'calm', 'snark', 'sad'],
+          description: '情绪：soft 撒娇 / tsun 傲娇 / hype 兴奋 / calm 温柔 / snark 吐槽 / sad 委屈；不传就用默认嗓音',
+        },
+      },
+      required: ['text'],
+    },
+    async (args) => {
+      const raw = String(args?.text || '').trim();
+      if (!raw) return '要说什么？text 是空的。';
+      if (!cfg.voiceEnabled) return '语音没开（设置里 voiceEnabled = false）。';
+      const body = raw.slice(0, Number(cfg.voiceMaxChars) || 120);
+      pendingVoice = { text: body, mood: String(args?.mood || '').trim() };
+      return `排上了，下一条回复后用 ${cfg.voiceName} 说：${body}`;
+    },
+  );
+
+  tool(
     'dfy_persona_read',
     '读取某个子人格的完整设定。先用列表里给的文件名，拿到全文再按她的口气回。',
     {
@@ -993,10 +1137,76 @@ export function apply(ctx, rawConfig = {}) {
       getOwnPropertyDescriptor: (_t, k) => ({ configurable: true, enumerable: true, value: cfg[k] }),
     },
   );
+  const voiceRoot = () => join(stateDir, 'voice');
+  let pendingVoice = null;
+  /** edge-tts 合成一段 mp3，返回绝对路径；失败返回 null。 */
+  /** 情绪 → rate/pitch 偏移。edge-tts 不支持 style，只有靠语速音调 + 标点语气词造情绪。 */
+const VOICE_MOODS = {
+  soft: { rate: '+8%', pitch: '+30Hz' },
+  tsun: { rate: '+22%', pitch: '+24Hz' },
+  hype: { rate: '+28%', pitch: '+32Hz' },
+  calm: { rate: '+6%', pitch: '+14Hz' },
+  snark: { rate: '+26%', pitch: '+20Hz' },
+  sad: { rate: '+4%', pitch: '+26Hz' },
+};
+
+function synthVoice(text, mood = '') {
+    return new Promise((resolve) => {
+      const body = String(text || '').replace(/\s+/g, ' ').trim();
+      if (!body) return resolve(null);
+      const dir = voiceRoot();
+      try {
+        mkdirSync(dir, { recursive: true });
+      } catch {
+        /* ignore */
+      }
+      const out = join(dir, `v-${Date.now()}.mp3`);
+      const py = String(cfg.voicePython || '').trim() || 'python';
+      const voice = String(cfg.voiceName || '').trim() || 'zh-CN-XiaoyiNeural';
+      const moodCfg = VOICE_MOODS[String(mood || '').trim()] || {};
+      const rate = String(moodCfg.rate || cfg.voiceRate || '').trim();
+      const pitch = String(moodCfg.pitch || cfg.voicePitch || '').trim();
+      execFile(
+        py,
+        ['-m', 'edge_tts', '--voice', voice]
+          .concat(rate ? ['--rate=' + rate] : [])
+          .concat(pitch ? ['--pitch=' + pitch] : [])
+          .concat(['--text', body, '--write-media', out]),
+        { timeout: 90000, windowsHide: true },
+        (err) => {
+          if (err) {
+            channelLog('warn', '语音合成失败：' + (err.message || err));
+            return resolve(null);
+          }
+          channelLog('info', '语音已合成：' + out);
+          resolve(out);
+        },
+      );
+    });
+  }
+  /** 取走待发语音：合成成功返回 { file }，没排队或失败返回 null。 */
+  async function takeVoice() {
+    if (!cfg.voiceEnabled) return null;
+    const queued = pendingVoice;
+    pendingVoice = null;
+    if (!queued) return null;
+    const text = typeof queued === 'string' ? queued : String(queued.text || '');
+    const mood = typeof queued === 'string' ? '' : String(queued.mood || '');
+    if (!text) return null;
+    const file = await synthVoice(text, mood);
+    return file ? { file, text } : null;
+  }
+
   const channelLog = (level, msg) => {
     try {
       mkdirSync(stateDir, { recursive: true });
-      appendFileSync(join(stateDir, 'channel.log'), `${new Date().toISOString()} [${level}] ${msg}\n`, 'utf8');
+      const logPath = join(stateDir, 'channel.log');
+      try {
+        if (statSync(logPath).size > 4 * 1024 * 1024) renameSync(logPath, join(stateDir, 'channel.log.1'));
+      } catch {
+        /* 还不存在就当没事 */
+      }
+      appendFileSync(logPath, `${new Date().toISOString()} [${level}] ${msg}\n`, 'utf8');
     } catch {
       /* ignore */
     }
@@ -1009,6 +1219,7 @@ export function apply(ctx, rawConfig = {}) {
     log: channelLog,
     rememberInbound,
     drawEmoji: () => drawEmoji(),
+    takeVoice: () => takeVoice(),
   });
 
   const startChannel = async () => {

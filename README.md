@@ -367,3 +367,28 @@ dsh-dfy-qq/
 ---
 
 MIT
+
+## 0.5.6 — 连接守护 / 日志轮转 / 语音条
+
+- **连接守护**：每 20 秒巡检一次，入站超过 90 秒没动静就主动断开让 NapCat 重连，同时每轮发一次 ping。掉线不再干等。
+- **日志轮转**：`.dfyqq/channel.log` 超过 4MB 自动滚成 `channel.log.1`，只留一份旧的；群里照旧只看到摘要。
+- **语音条**：新增工具 `dfy_voice_say({ text })`——把要说的话排进队列，下一条文字回复之后用 edge-tts（默认 `zh-CN-XiaoyiNeural`）合成 mp3，以 OneBot `record` 段发出，NapCat 自动转 silk。
+  - 配置：`voiceEnabled`（默认 true）、`voiceName`、`voiceMaxChars`（默认 120）、`voicePython`（空 = 用 PATH 里的 python）。
+  - 依赖：本机 `python -m edge_tts` 可用（`pip install edge-tts`）。
+  - 合成失败只写日志，不影响文字回复。
+
+## 情绪语音（mood）
+
+`dfy_voice_say` 多了一个 `mood` 参数，用「语速 + 音调偏移 + 标点语气词」造情绪（edge-tts 不支持 style 参数，只能这么来）：
+
+| mood | 情绪 | rate | pitch |
+|---|---|---|---|
+| soft | 撒娇 | +8% | +30Hz |
+| tsun | 傲娇 | +22% | +24Hz |
+| hype | 兴奋 | +28% | +32Hz |
+| calm | 温柔 | +6% | +14Hz |
+| snark | 吐槽 | +26% | +20Hz |
+| sad | 委屈 | +4% | +26Hz |
+
+不传 mood 就用 `voiceRate` / `voicePitch`（默认 +18% / +22Hz，就是视频鱼那条嗓子）。
+情绪靠标点撑起来，所以文本本身要带语气词（「嘛」「呀」「哼」「……」），光改参数听不出区别。
